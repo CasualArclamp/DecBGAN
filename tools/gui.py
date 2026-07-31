@@ -35,7 +35,7 @@ from scipy.signal import welch                                # noqa: E402
 
 from bgan import spec, mod, recv, bulletin, pcapout           # noqa: E402
 from tools.decode_wav import (decode_capture, survey,          # noqa: E402
-                              channelise, MOS)
+                              channelise, safe_stem, MOS)
 
 NL = chr(10)
 BG = "#1c1f26"
@@ -175,6 +175,7 @@ def probe_wav(path):
                         mb=os.path.getsize(path)/1e6)
     except Exception:
         return None
+
 
 
 def _hms(s):
@@ -660,8 +661,9 @@ class App(tk.Tk):
         r = self._need()
         if not r:
             return
-        p = filedialog.asksaveasfilename(defaultextension=".pcap",
-                                         initialfile="bgan_blocks.pcap")
+        p = filedialog.asksaveasfilename(
+            defaultextension=".pcap",
+            initialfile=f"{safe_stem(r.info.get('path'))}_blocks.pcap")
         if not p:
             return
         n = pcapout.write_blocks(
@@ -673,8 +675,9 @@ class App(tk.Tk):
         r = self._need()
         if not r:
             return
-        p = filedialog.asksaveasfilename(defaultextension=".pcap",
-                                         initialfile="bgan_ipv4.pcap")
+        p = filedialog.asksaveasfilename(
+            defaultextension=".pcap",
+            initialfile=f"{safe_stem(r.info.get('path'))}_ipv4.pcap")
         if not p:
             return
         n = pcapout.write_ipv4(p, r.payload)
@@ -687,8 +690,9 @@ class App(tk.Tk):
         r = self._need()
         if not r:
             return
-        p = filedialog.asksaveasfilename(defaultextension=".bin",
-                                         initialfile="bgan_payload.bin")
+        p = filedialog.asksaveasfilename(
+            defaultextension=".bin",
+            initialfile=f"{safe_stem(r.info.get('path'))}_payload.bin")
         if not p:
             return
         Path(p).write_bytes(r.payload)

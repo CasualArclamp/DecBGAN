@@ -94,7 +94,8 @@ python tools/gui.py path/to/capture.wav
 Spectrum and live constellation, a progress bar, carrier and bearer-control
 readouts, then tabs for strings, parsed BulletinBoards, carved packets and a
 log. Export buttons produce a lossless block pcap, a carved-IPv4 pcap, or the
-raw payload.
+raw payload; each is named after the capture it came from, so exports from
+different recordings do not collide.
 
 Selecting a capture reads its WAV header (instantly, no samples touched) and
 shows length, sample rate, size, frame/block count and an estimated decode
@@ -118,7 +119,7 @@ roughly 3 minutes. The estimate shown updates when you toggle level search.
 
 ```bash
 python tools/decode_wav.py capture.wav --survey     # fast scan, no decoding
-python tools/decode_wav.py capture.wav              # decode, write payload
+python tools/decode_wav.py capture.wav              # -> work/<capture>_payload.bin
 python tools/parse_bulletin.py work/payload.npz     # bearer control
 python tools/scan_bearers.py capture.wav            # what carriers are present
 python tests/waterfall.py                           # codec vs Annex B2

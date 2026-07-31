@@ -20,6 +20,7 @@ time:
 """
 from __future__ import annotations
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -192,6 +193,23 @@ def decode_block(blk, level, n0=0.5, iters=8):
     sel = t.cipm.kind != 0            # parity only; systematic bits inflate it
     ag = float(np.mean(slots[sel] == hard[sel]))
     return bits[:t.D], ag, verify_block(bits, t, llr)
+
+
+def safe_stem(path, maxlen=64):
+    """Filesystem-safe stem of a capture name, for naming outputs after it.
+
+    Long names are shortened from the middle: the head says what the
+    recording is, the tail keeps the frequency and timestamp that actually
+    distinguish one capture from another.
+    """
+    stem = Path(path).stem if path else "capture"
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    if len(stem) > maxlen:
+        head = maxlen//3
+        tail = maxlen - head - 1
+        stem = (stem[:head].rstrip("._-") + "_"
+                + stem[-tail:].lstrip("._-"))
+    return stem or "capture"
 
 
 TAU_STEPS = 8
@@ -465,7 +483,8 @@ def main():
                     action="store_false",
                     help="use the UW level for all 8 blocks (much faster, "
                          "but blocks 1-7 mostly will not decode)")
-    ap.add_argument("--out", default="work/wav_payload.bin")
+    ap.add_argument("--out", default=None,
+                    help="payload path; defaults to work/<capture name>_payload.bin")
     a = ap.parse_args()
 
     def prog(frac, text, const=None):
@@ -538,7 +557,8 @@ def main():
     print("  per block index: " +
           "  ".join(f"b{i} {bybl[i]}" for i in range(8)))
     if out:
-        p = Path(a.out)
+        p = Path(a.out) if a.out else (
+            Path("work")/f"{safe_stem(a.path)}_payload.bin")
         p.parent.mkdir(parents=True, exist_ok=True)
         payload = np.packbits(np.concatenate(out)).tobytes()
         p.write_bytes(payload)
