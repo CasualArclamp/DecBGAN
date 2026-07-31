@@ -166,7 +166,7 @@ not pin down, what was resolved and how, and what is still guesswork.
 
 ## Legal and ethical
 
-This decodes a satellite downlink you can receive with a €30 SDR. Whether you
+This decodes a satellite downlink you can receive with a $30 SDR. Whether you
 may lawfully receive, decode, record or act on such transmissions depends on
 where you are — many jurisdictions restrict interception of communications not
 intended for you, regardless of how easy they are to pick up. Check your local
