@@ -1,0 +1,46 @@
+# --- ETSI specification material -------------------------------------------
+# TS 102 744 is ETSI copyright. It is free to download from etsi.org but not
+# ours to redistribute, so the PDFs and the Annex C data tables stay out of
+# this repository. See README.md for how to fetch them.
+*.pdf
+*.xlsx
+docs/ts_*.zip
+docs/ts_1027440201_AnnexC1_v010101p0/
+docs/ts_1027440201_AnnexC2_v010101p0/
+ts_1027440201_AnnexC1_v010101p0/
+ts_1027440201_AnnexC2_v010101p0/
+annex/
+
+# --- recovered traffic -------------------------------------------------------
+# Decoded payloads contain real third-party communications: IP addresses,
+# TLS handshakes, HTTP requests, software-update paths belonging to whoever
+# happened to be using the link. Publishing a decoder is not the same as
+# publishing what it decoded. Keep all of it local.
+*.bin
+*.pcap
+*.pcapng
+*.npz
+work/
+!work/.gitkeep
+
+# --- captures ----------------------------------------------------------------
+# IQ recordings are large and are also third-party traffic.
+*.wav
+*.iq
+*.cf32
+*.sigmf-data
+
+# --- python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- editors / os ------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

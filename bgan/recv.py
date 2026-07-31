@@ -1,0 +1,431 @@
+"""Receiver front end: channelisation, timing, frame sync, carrier recovery.
+
+Every stage here is validated against bgan.tx output at known impairments
+before it is pointed at real IQ, so that a failure can be attributed to the
+receiver rather than to the signal.
+"""
+from __future__ import annotations
+import struct
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+from scipy.signal import resample_poly, lfilter, welch
+
+from . import spec, mod
+from .tx import rrc
+
+
+# --- IQ loading --------------------------------------------------------------
+
+def load_wav_iq(path, secs=None, offset=0.0):
+    """Load interleaved int16 IQ from a WAV file. Returns (x, sample_rate)."""
+    f = open(path, "rb")
+    hdr = f.read(256)
+    if hdr[:4] != b"RIFF":
+        raise ValueError("not a RIFF file")
+    o, sr, data_off, bits = 12, None, None, None
+    while o < len(hdr)-8:
+        cid = hdr[o:o+4]
+        sz = struct.unpack("<I", hdr[o+4:o+8])[0]
+        if cid == b"fmt ":
+            _, ch, sr, _, _, bits = struct.unpack("<HHIIHH", hdr[o+8:o+24])
+            if ch != 2:
+                raise ValueError(f"expected 2 channels (I/Q), got {ch}")
+            if bits != 16:
+                raise ValueError(f"expected 16-bit, got {bits}")
+        if cid == b"data":
+            data_off = o+8
+            break
+        o += 8+sz+(sz & 1)
+    if data_off is None or sr is None:
+        raise ValueError("no fmt/data chunk found")
+    f.seek(data_off + int(offset*sr)*4)
+    n = int(sr*secs)*4 if secs else -1
+    d = np.frombuffer(f.read(n), dtype="<i2").astype(np.float32)
+    if len(d) % 2:
+        d = d[:-1]
+    return (d[0::2] + 1j*d[1::2])/32768.0, sr
+
+
+# --- carrier location --------------------------------------------------------
+
+def find_carrier(x, sr, rs=None, bw_factor=1.25):
+    """Locate the strongest carrier and return its centre offset in Hz."""
+    rs = rs or spec.F80T45X8B.rs
+    bw = rs*bw_factor
+    fr, P = welch(x, sr, nperseg=32768, return_onesided=False, detrend=False)
+    i = np.argsort(fr)
+    fr, P = fr[i], P[i]
+    Ps = np.convolve(P, np.ones(64)/64, "same")
+    n0 = np.median(np.sort(Ps)[:len(Ps)//5])
+    win = max(1, int(bw/(fr[1]-fr[0])))
+    integ = np.convolve(np.maximum(Ps-n0, 0), np.ones(win), "same")
+    return float(fr[int(np.argmax(integ))])
+
+
+def refine_centre(x, sr, rs=None, iters=3):
+    """Refine a near-centred carrier to its spectral centroid."""
+    rs = rs or spec.F80T45X8B.rs
+    total = 0.0
+    n = np.arange(len(x))
+    for _ in range(iters):
+        fr, P = welch(x, sr, nperseg=32768, return_onesided=False, detrend=False)
+        i = np.argsort(fr)
+        fr, P = fr[i], P[i]
+        b = np.abs(fr) < rs*0.75
+        n0 = np.median(P[(np.abs(fr) > rs*0.72) & (np.abs(fr) < rs*0.95)])
+        w = np.maximum(P[b]-n0, 0)
+        d = float(np.sum(fr[b]*w)/np.sum(w))
+        x = x*np.exp(-2j*np.pi*d*n/sr)
+        total += d
+    return x, total
+
+
+def channelize(x, sr, sps=4, rs=None, beta=None, span=16, centre=None):
+    """Shift the carrier to baseband, resample to `sps` samples/symbol and
+    apply the receive matched filter. Returns (y, fs, centre_hz)."""
+    rs = rs or spec.F80T45X8B.rs
+    beta = spec.ROLLOFF if beta is None else beta
+    c = find_carrier(x, sr, rs) if centre is None else centre
+    y = x*np.exp(-2j*np.pi*c*np.arange(len(x))/sr)
+    y, extra = refine_centre(y, sr, rs)
+
+    from math import gcd
+    tgt = int(round(rs*sps))
+    g = gcd(tgt, int(sr))
+    y = resample_poly(y, tgt//g, int(sr)//g)
+
+    h = rrc(beta, sps, span)
+    y = lfilter(h, 1, y)[len(h)//2:]
+    return y, float(tgt), c+extra
+
+
+# --- timing recovery ---------------------------------------------------------
+# The |x|^2 spectral line at the symbol rate is ~19 dB above the floor on these
+# captures, so a single global estimate of (rate, phase) beats any block-wise
+# fit. Estimating rate coherently over the whole capture also absorbs clock
+# error, which a fixed-rate resampler cannot.
+
+def estimate_symbol_clock(y, fs, rs_nominal=None, search_ppm=200.0):
+    """Estimate the true symbol rate and timing phase from the |y|^2 tone.
+
+    Returns (rs_est, tau0) where tau0 is the timing phase in samples at t=0.
+    """
+    rs_nominal = rs_nominal or spec.F80T45X8B.rs
+    m = np.abs(y)**2
+    m = m - m.mean()
+    n = np.arange(len(m), dtype=np.float64)
+
+    # coarse: FFT peak near the nominal rate (floor, so N <= len(m))
+    N = 1 << int(np.floor(np.log2(min(len(m), 1 << 22))))
+    M = np.fft.rfft(m[:N]*np.hanning(N))
+    frq = np.fft.rfftfreq(N, 1/fs)
+    lo = np.searchsorted(frq, rs_nominal*(1-search_ppm/1e6))
+    hi = np.searchsorted(frq, rs_nominal*(1+search_ppm/1e6))
+    k = lo + int(np.argmax(np.abs(M[lo:hi])))
+    f0 = frq[k]
+
+    # Fine: refine by phase slope rather than by searching. Accumulate the
+    # tone over each half of the capture; the phase difference between the
+    # halves gives the residual frequency error directly. Converges in a few
+    # passes and costs one pass over the data each, instead of ~80.
+    half = len(m)//2
+
+    def accum(f, lo, hi, chunk=1 << 21):
+        """Sum m[lo:hi] * exp(-j2pi f n/fs), chunked to bound memory."""
+        tot = 0.0 + 0.0j
+        for s in range(lo, hi, chunk):
+            e = min(s+chunk, hi)
+            idx = n[s:e]
+            tot += np.sum(m[s:e]*np.exp(-2j*np.pi*f*idx/fs))
+        return tot
+
+    f = f0
+    for _ in range(4):
+        c1 = accum(f, 0, half)
+        c2 = accum(f, half, 2*half)
+        if abs(c1) == 0 or abs(c2) == 0:
+            break
+        # centres of the two halves are half/2 apart
+        dphi = np.angle(c2*np.conj(c1))
+        f += dphi/(2*np.pi)*fs/half
+    rs_est = f
+
+    c = accum(rs_est, 0, len(m))
+    # the tone peaks at the optimum sampling instant
+    tau0 = -np.angle(c)/(2*np.pi)*(fs/rs_est)
+    return float(rs_est), float(tau0)
+
+
+def _cubic(y, i, mu):
+    ym1, y0, y1, y2 = y[i-1], y[i], y[i+1], y[i+2]
+    c0 = y0
+    c1 = 0.5*(y1-ym1)
+    c2 = ym1 - 2.5*y0 + 2*y1 - 0.5*y2
+    c3 = 0.5*(y2-ym1) + 1.5*(y0-y1)
+    return ((c3*mu + c2)*mu + c1)*mu + c0
+
+
+def extract_symbols(y, fs, rs_est, tau0):
+    """Sample y at the symbol instants using cubic interpolation."""
+    period = fs/rs_est
+    n = int((len(y)-4)/period) - 1
+    pos = tau0 + period*np.arange(n)
+    keep = (pos > 1) & (pos < len(y)-3)
+    pos = pos[keep]
+    i0 = np.floor(pos).astype(np.int64)
+    return _cubic(y, i0, pos-i0)
+
+
+def timing_quality(sym):
+    """M4/M2^2 of the symbol stream. 1.32 is ideal 16-QAM, 2.0 is noise.
+    Used to validate timing recovery rather than trusting convergence."""
+    m2 = np.mean(np.abs(sym)**2)
+    m4 = np.mean(np.abs(sym)**4)
+    return float(m4/m2**2)
+
+
+ESN0_M4_CAP_DB = 30.0
+ESN0_M4_FLOOR_DB = -10.0
+
+
+def esn0_from_m4(r, cap_db=ESN0_M4_CAP_DB, floor_db=ESN0_M4_FLOOR_DB):
+    """Invert (1.32 rho^2 + 4 rho + 2)/(rho+1)^2 = r.
+
+    Calibrated to +/-0.25 dB over 8..20 dB against the loopback transmitter.
+
+    The expression tends to 1.32 from above as rho -> infinity, so at very high
+    SNR estimation noise drives the measured r to or below 1.32, the quadratic
+    degenerates and the naive inversion returns NaN. That NaN used to
+    propagate into the demapper's n0 and silently kill every decode -- the
+    cleanest possible signal was the one that failed. Saturate instead: above
+    ~cap_db this estimator has no resolution anyway.
+    """
+    # The two degenerate ends mean OPPOSITE things and must not share a branch:
+    #   r -> 1.32 is the noiseless limit  (very high SNR)
+    #   r -> 2.00 is the Gaussian limit   (no signal)
+    if not np.isfinite(r):
+        return float(cap_db)
+    if r <= 1.3205:
+        return float(cap_db)
+    if r >= 1.9995:
+        return float(floor_db)
+    a, b, c = 1.32-r, 4-2*r, 2-r
+    disc = b*b - 4*a*c
+    if disc < 0 or abs(a) < 1e-12:
+        return float(floor_db)
+    rho = (-b - np.sqrt(disc))/(2*a)
+    if not np.isfinite(rho) or rho <= 0:
+        return float(floor_db)
+    return float(min(max(10*np.log10(rho), floor_db), cap_db))
+
+
+# --- frame synchronisation ---------------------------------------------------
+
+def uw_templates(normalise=True, levels=None):
+    """The candidate unique words as symbol sequences.
+
+    Defaults to the 10 levels F80T4.5X-8B actually uses. spec.UNIQUE_WORDS
+    holds 15 (L8..H6) covering all bearer types; searching the 5 that this
+    bearer cannot use only adds false-alarm opportunities.
+    """
+    levels = levels or spec.LEVELS_F80T45X8B
+    return {lvl: mod.uw_symbols(lvl, normalise) for lvl in levels}
+
+
+def frame_sync(sym, bearer=spec.F80T45X8B, templates=None):
+    """Non-coherent UW search, folded over the frame period.
+
+    Returns (offset, level, metric, all_scores) where offset is the index of
+    the first UW symbol and level identifies which UW matched.
+
+    Non-coherent because a residual carrier offset rotates the 40 UW symbols;
+    at 264 us even a 100 Hz residual is under 10 degrees, so magnitude
+    correlation is ample and needs no prior carrier recovery.
+    """
+    mos = bearer.mos
+    templates = templates or uw_templates()
+    nfr = len(sym)//mos
+    if nfr < 2:
+        raise ValueError(f"need at least 2 frames, have {nfr}")
+    usable = nfr*mos
+    s = sym[:usable]
+
+    best = None
+    scores = {}
+    for lvl, t in templates.items():
+        tc = np.conj(t[::-1])
+        corr = np.convolve(s, tc, mode="valid")     # len usable-39
+        p = np.abs(corr)**2
+        pad = np.zeros(nfr*mos)
+        pad[:len(p)] = p
+        folded = pad.reshape(nfr, mos).sum(axis=0)
+        j = int(np.argmax(folded))
+        # peak-to-sidelobe: exclude a small guard around the peak
+        g = np.ones(mos, bool)
+        g[max(0, j-3):j+4] = False
+        psr = folded[j]/np.mean(folded[g])
+        scores[lvl] = (j, float(psr))
+        if best is None or psr > best[2]:
+            best = (j, lvl, float(psr))
+    return best[0], best[1], best[2], scores
+
+
+# --- carrier / phase recovery ------------------------------------------------
+
+def pilot_phase(frame, bearer=spec.F80T45X8B):
+    """Phase error at each pilot of one aligned frame."""
+    _, pil, _ = mod.frame_layout(bearer)
+    ref = mod.pilot_symbol()
+    return np.angle(frame[pil]*np.conj(ref)), np.flatnonzero(pil)
+
+
+def correct_phase(frame, bearer=spec.F80T45X8B, uw_level=None, smooth=9):
+    """Estimate the carrier phase from the pilots and derotate the frame.
+
+    A single pilot at Es/N0 rho has phase noise ~1/sqrt(2 rho): about 10
+    degrees at 12 dB. Interpolating raw pilot phases therefore injects ~10
+    degrees of jitter into every data symbol, which is severe for 16-QAM and
+    costs several dB. So smooth first.
+
+    Smoothing is done on the complex pilot products and the angle taken
+    afterwards, rather than unwrapping phases and smoothing those: unwrap on
+    noisy samples can take a wrong branch, and that failure is silent.
+
+    `smooth` is the moving-average length in pilots; it trades phase-noise
+    suppression against the ability to follow real phase movement. The UW
+    anchors the start of the frame, where no pilot has been seen yet.
+    """
+    _, pil, _ = mod.frame_layout(bearer)
+    pos = np.flatnonzero(pil).astype(float)
+    ref = mod.pilot_symbol()
+    z = frame[pil]*np.conj(ref)
+
+    if uw_level is not None:
+        uw = mod.uw_symbols(uw_level)
+        # the whole UW coherently averaged is worth ~40 pilots, so it is a
+        # strong anchor; weight it accordingly
+        zu = np.sum(frame[:bearer.uw_syms]*np.conj(uw))/bearer.uw_syms
+        z = np.concatenate([[zu*np.sqrt(bearer.uw_syms)], z])
+        pos = np.concatenate([[bearer.uw_syms/2], pos])
+
+    if smooth and smooth > 1 and len(z) > smooth:
+        k = np.ones(smooth)/smooth
+        zs = np.convolve(z, k, mode="same")
+        # edges of 'same' are under-averaged; renormalise by the window that
+        # actually contributed
+        norm = np.convolve(np.ones(len(z)), k, mode="same")
+        z = zs/norm
+    ph = np.unwrap(np.angle(z))
+
+    idx = np.arange(len(frame))
+    return frame*np.exp(-1j*np.interp(idx, pos, ph))
+
+
+def fine_cfo_from_pilots(sym, offset, level, bearer=spec.F80T45X8B, nframes=None):
+    """Data-aided residual CFO from the known UW and pilot symbols.
+
+    The spectral-centroid estimate in channelize() is only good to ~100 Hz,
+    which is ample for the non-coherent UW search but not for demodulation.
+    Once framing is known, the UW and the 88 pilots per frame are known
+    symbols, so their phase advance measures the residual directly.
+
+    Returns cfo in Hz.
+    """
+    mos = bearer.mos
+    _, pil, _ = mod.frame_layout(bearer)
+    pil_idx = np.flatnonzero(pil)
+    uw = mod.uw_symbols(level)
+    ref = mod.pilot_symbol()
+
+    n = (len(sym)-offset)//mos
+    if nframes:
+        n = min(n, nframes)
+    if n < 1:
+        raise ValueError("no complete frames")
+
+    # phase of each known symbol, against its absolute symbol index
+    idx, ph = [], []
+    for f in range(n):
+        base = offset + f*mos
+        fr = sym[base:base+mos]
+        if len(fr) < mos:
+            break
+        idx.append(base + np.arange(bearer.uw_syms))
+        ph.append(fr[:bearer.uw_syms]*np.conj(uw))
+        idx.append(base + pil_idx)
+        ph.append(fr[pil_idx]*np.conj(ref))
+    idx = np.concatenate(idx).astype(np.float64)
+    z = np.concatenate(ph)
+
+    # Estimate the phase slope without unwrapping: correlate successive known
+    # symbols separated by a fixed lag. Unwrapping across noisy pilots is
+    # exactly the kind of thing that silently picks a wrong branch.
+    order = np.argsort(idx)
+    idx, z = idx[order], z[order]
+    d = np.diff(idx)
+    step = np.median(d[d > 0])
+    sel = np.abs(d - step) < 1e-9
+    if not np.any(sel):
+        raise ValueError("no uniformly spaced known symbols")
+    acc = np.sum(z[1:][sel]*np.conj(z[:-1][sel]))
+    dphi = np.angle(acc)
+    return float(dphi/(2*np.pi*step)*spec.F80T45X8B.rs)
+
+
+# --- blind carrier recovery --------------------------------------------------
+# Must run BEFORE frame sync. fine_cfo_from_pilots() needs framing, and framing
+# needs a usable constellation, so a pilot-aided-only design is circular. This
+# breaks the loop and is validated to be CFO-invariant from 0 to 8 kHz.
+
+def blind_carrier_recovery(s, blk=64, corner_thresh=1.15):
+    """Two-stage blind carrier recovery for 16-QAM.
+
+    Stage 1: bulk CFO from the 4th-power spectral line over the whole capture.
+    Stage 2: residual phase per short block from outer-ring symbols only.
+
+    Both stages are needed. 16-QAM has a much weaker 4th-power line than QPSK
+    (it is not constant-modulus), so a global estimate alone is fragile; and a
+    per-block estimate alone fails above ~50 Hz, because at 300 Hz a
+    256-symbol block already rotates 183 degrees and smears itself. Measured
+    on synthetic at Es/N0 12 dB, per-block alone recovers a 50 Hz offset
+    (gridness 0.365) but not 300 Hz (0.078); the two stages together give
+    0.4509 at every offset from 0 to 8 kHz.
+
+    'gridness' here is |mean(s^4)| / mean(|s|^4): ~0.45 for an aligned 16-QAM
+    grid at 12 dB, ~0 for an unrecovered (rotationally symmetric) one.
+    """
+    z = s**4
+    N = 1 << int(np.floor(np.log2(len(z))))
+    Z = np.fft.fft(z[:N])
+    k = int(np.argmax(np.abs(Z)))
+    if k > N//2:
+        k -= N
+    df = (k/N)/4.0
+    s = s*np.exp(-2j*np.pi*df*np.arange(len(s)))
+
+    out = np.empty_like(s)
+    prev = 0.0
+    for i in range(0, len(s), blk):
+        seg = s[i:i+blk]
+        a = np.abs(seg)
+        sel = seg[a > corner_thresh]
+        if len(sel) < 4:
+            sel = seg[a > np.percentile(a, 70)] if len(seg) > 4 else seg
+        if len(sel) < 3:
+            ph = prev
+        else:
+            # corner points sit at 45+n*90 deg, so angle(sum(s^4))/4 returns
+            # phi + 45 deg; subtract it or the whole grid comes out rotated
+            ph = np.angle(np.sum(sel**4))/4.0 - np.pi/4
+            ph += np.round((prev-ph)/(np.pi/2))*(np.pi/2)
+        prev = ph
+        out[i:i+blk] = seg*np.exp(-1j*ph)
+    return out
+
+
+def gridness(s):
+    """|mean(s^4)|/mean(|s|^4). ~0.45 for an aligned 16-QAM grid at 12 dB,
+    ~0 when the carrier is unrecovered. Cheap health check on the front end."""
+    return float(abs(np.mean(s**4))/np.mean(np.abs(s)**4))
