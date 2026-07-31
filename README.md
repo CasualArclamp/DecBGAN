@@ -88,8 +88,17 @@ readouts, then tabs for strings, parsed BulletinBoards, carved packets and a
 log. Export buttons produce a lossless block pcap, a carved-IPv4 pcap, or the
 raw payload.
 
-Leave **search levels** on. Off is ~10x faster but only recovers block 0,
+Selecting a capture reads its WAV header (instantly, no samples touched) and
+shows length, sample rate, size, frame/block count and an estimated decode
+time. **Max** fills in the full length; asking for more than the file holds is
+clamped and logged.
+
+Leave **search levels** on. Off is ~9x faster but only recovers block 0,
 which is about an eighth of the data.
+
+Decode cost on the development machine is about **9.8 s of compute per second
+of capture** with level search, **1.0 s/s** without — so a 60 s capture is
+roughly 10 minutes. The estimate shown updates when you toggle level search.
 
 ### Command line
 

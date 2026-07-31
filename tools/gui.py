@@ -15,6 +15,7 @@ import queue
 import re
 import sys
 import threading
+import wave
 import traceback
 from pathlib import Path
 
@@ -143,6 +144,46 @@ def _freq_from_name(path):
     return int(m.group(1)) if m else None
 
 
+# Wall-clock cost of a decode, in seconds of compute per second of capture,
+# with the 8-phase timing search on. Measured on this machine by timing 4 s
+# and 12 s decodes and fitting a line: 9.84 s/s with -0.6 s fixed, i.e. the
+# numba JIT warmup is negligible once its cache is warm.
+#
+# Without the 10-level trial decode it is 1.03 s/s -- a measured 0.11 ratio,
+# not the 10x the level count would suggest, because the timing survey and
+# framing are paid either way.
+#
+# A guide for choosing a length, not a promise; a slower machine will differ.
+EST_SEC_PER_SEC = 9.84
+EST_NOSEARCH_RATIO = 0.11
+
+
+def probe_wav(path):
+    """WAV header summary: duration, rate, channels, size. No samples read."""
+    try:
+        if not path or not os.path.isfile(path):
+            return None
+        with wave.open(path) as w:
+            sr = w.getframerate()
+            n = w.getnframes()
+            if not sr or not n:
+                return None
+            return dict(sr=sr, ch=w.getnchannels(), width=w.getsampwidth(),
+                        frames=n, secs=n/sr,
+                        mb=os.path.getsize(path)/1e6)
+    except Exception:
+        return None
+
+
+def _hms(s):
+    s = int(round(s))
+    if s < 90:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s//60}m{s % 60:02d}s"
+    return f"{s//3600}h{(s % 3600)//60:02d}m"
+
+
 def _occupied_bw(f, p, frac=0.99):
     """99% power bandwidth, in Hz."""
     p = np.maximum(p - np.median(np.sort(p)[:len(p)//5]), 0)
@@ -203,13 +244,26 @@ class App(tk.Tk):
         ttk.Label(top, text="  seconds").pack(side="left")
         self.secsvar = tk.StringVar(value="20")
         ttk.Entry(top, textvariable=self.secsvar, width=6).pack(side="left")
+        ttk.Button(top, text="Max", command=self._use_max,
+                   width=5).pack(side="left", padx=(2, 0))
         self.searchvar = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="search levels (10x slower, needed for "
                                   "blocks 1-7)",
-                        variable=self.searchvar).pack(side="left", padx=8)
+                        variable=self.searchvar,
+                        command=lambda: self._probe_path()).pack(
+                            side="left", padx=8)
         self.btn = ttk.Button(top, text="Decode", command=self._start)
         self.btn.pack(side="left", padx=4)
         ttk.Button(top, text="Stop", command=self.stop.set).pack(side="left")
+
+        # capture summary, refreshed whenever the path changes
+        cap = ttk.Frame(self, padding=(8, 0, 8, 4))
+        cap.pack(fill="x")
+        self.capvar = tk.StringVar(value="no capture selected")
+        ttk.Label(cap, textvariable=self.capvar, foreground=ACC).pack(
+            side="left")
+        self.probe = None
+        self.pathvar.trace_add("write", lambda *_: self._probe_path())
 
         pr = ttk.Frame(self, padding=(8, 0))
         pr.pack(fill="x")
@@ -276,6 +330,32 @@ class App(tk.Tk):
         if p:
             self.pathvar.set(p)
 
+    def _probe_path(self):
+        """Read the WAV header so the length is known before decoding.
+
+        Header only -- no samples are read, so this stays instant even on a
+        multi-gigabyte capture.
+        """
+        self.probe = probe_wav(self.pathvar.get().strip('"'))
+        p = self.probe
+        if p is None:
+            self.capvar.set("no capture selected (or not a readable WAV)")
+            return
+        frames = p["secs"]/0.080
+        est = p["secs"]*EST_SEC_PER_SEC*(
+            1.0 if self.searchvar.get() else EST_NOSEARCH_RATIO)
+        self.capvar.set(
+            f"{p['secs']:.1f} s  |  {p['sr']/1e3:.0f} kHz  {p['ch']}ch "
+            f"{8*p['width']}-bit  |  {p['mb']:.0f} MB  |  "
+            f"~{frames:.0f} frames, {frames*8:.0f} blocks  |  "
+            f"full decode ~{_hms(est)}")
+
+    def _use_max(self):
+        if self.probe:
+            self.secsvar.set(f"{self.probe['secs']:.1f}")
+        else:
+            self.capvar.set("pick a capture first")
+
     def _start(self):
         p = self.pathvar.get().strip('"')
         if not p or not os.path.exists(p):
@@ -287,6 +367,13 @@ class App(tk.Tk):
             secs = float(self.secsvar.get())
         except ValueError:
             secs = None
+        # Clamp to the file: asking for more than exists silently gives you
+        # the whole file, which makes the progress and time estimate wrong.
+        if self.probe and secs and secs > self.probe["secs"]:
+            self._log(f"requested {secs:.1f} s but the capture is only "
+                      f"{self.probe['secs']:.1f} s - using the whole file")
+            secs = self.probe["secs"]
+            self.secsvar.set(f"{secs:.1f}")
         for t in (self.tab_str, self.tab_bb, self.tab_pkt, self.tab_log):
             t.delete("1.0", "end")
         self.stop.clear()
