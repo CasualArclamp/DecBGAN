@@ -5,6 +5,8 @@
 *.pdf
 *.xlsx
 docs/ts_*.zip
+*.7z
+*.rar
 docs/ts_1027440201_AnnexC1_v010101p0/
 docs/ts_1027440201_AnnexC2_v010101p0/
 ts_1027440201_AnnexC1_v010101p0/

@@ -29,8 +29,10 @@ Written in Python with numba for the turbo decoder. No compiler needed.
 
 Being precise about this, because the gap is real:
 
-- **~39% of blocks decode** over a whole capture (86% over a clean window).
-  The rest are lost to fades and frames that never lock.
+- **~98% of blocks decode** on a good capture. Earlier versions managed 39%;
+  the difference was a single global symbol-timing phase, which a recording
+  with dropped samples invalidates (see docs/VALIDATION.md). Weak or
+  interference-hit captures still do worse.
 - **No protocol demux.** Payload is decoded FEC blocks concatenated, with
   silent gaps where blocks failed. IP packets are *carved* by scanning for
   valid IPv4 headers, not reassembled. Doing it properly needs
@@ -86,8 +88,8 @@ readouts, then tabs for strings, parsed BulletinBoards, carved packets and a
 log. Export buttons produce a lossless block pcap, a carved-IPv4 pcap, or the
 raw payload.
 
-Leave **search levels** on. Off is ~10× faster but only recovers block 0,
-which is about a quarter of the data.
+Leave **search levels** on. Off is ~10x faster but only recovers block 0,
+which is about an eighth of the data.
 
 ### Command line
 
@@ -111,7 +113,7 @@ Recorded with an RTL-SDR v4 and an L-band patch antenna, via SDR++:
 
 ## Validation
 
-Full detail in [`docs/VALIDATION.md`](docs/VALIDATION.md). Three independent
+Full detail in [`docs/VALIDATION.md`](docs/VALIDATION.md). Four independent
 lines of evidence, summarised:
 
 **1. Codec against the standard's own numbers.** `tests/waterfall.py` finds
@@ -132,6 +134,12 @@ captures at two sample rates.
 
 Synthetic loopback regression: **4149/4149 blocks bit-exact, zero false
 positives.**
+
+**4. Independent checks scale with yield.** Fixing per-frame symbol timing
+took a real capture from 39.2% to 98.5% of blocks. The BulletinBoard count
+rose 13 -> 28 (of 29 possible), the frame-no offset and 17-frame period were
+unchanged, and AVP-predicted coding levels went from 103/0 to 219/0
+agree/disagree. A decoder manufacturing blocks would not do that.
 
 ---
 

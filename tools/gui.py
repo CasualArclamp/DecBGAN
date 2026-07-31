@@ -33,8 +33,7 @@ from matplotlib.backends.backend_tkagg import (                # noqa: E402
 from scipy.signal import welch                                # noqa: E402
 
 from bgan import spec, mod, recv, bulletin, pcapout           # noqa: E402
-from tools.decode_wav import (front_end, track_offsets, prepare,   # noqa: E402
-                              decode_block, decode_block_anylevel, MOS)
+from tools.decode_wav import decode_capture, channelise, MOS  # noqa: E402
 
 BG = "#1c1f26"
 FG = "#d8dee9"
@@ -90,49 +89,31 @@ class Worker(threading.Thread):
 
         self.emit("status", text="channelising and recovering timing...",
                   pct=10)
-        s, info = front_end(self.path, secs=self.secs)
-        r.info = info
+
+        def prog(frac, text, const=None):
+            if self.stop.is_set():
+                raise KeyboardInterrupt
+            self.emit("progress", pct=6 + 91*frac, text=text, const=const)
+
+        try:
+            recs, info, (tau_idx, offs, lvls, mets) = decode_capture(
+                self.path, secs=self.secs, search_levels=self.search,
+                progress=prog)
+        except KeyboardInterrupt:
+            self.emit("status", text="stopped", pct=0)
+            return
+        r.info = dict(info)
         r.info["path"] = self.path
         r.info["file_hz"] = _freq_from_name(self.path)
         r.info["occ_bw"] = _occupied_bw(fr[i], P[i])
-        self.emit("info", info=dict(r.info))
-
-        self.emit("status", text="acquiring frame timing...", pct=16)
-        offs, lvls, mets = track_offsets(s)
         r.offs, r.lvls, r.mets = offs, lvls, mets
+        r.recs = [(f, b, lv, ag, bits) for f, b, lv, ag, bits in recs]
+        r.const = info.get("const", np.zeros(0, complex))
+        self.emit("info", info=dict(r.info))
         rel = offs - np.arange(len(offs))*MOS
-        self.emit("track", nplateau=int(np.count_nonzero(np.diff(rel)) + 1),
+        self.emit("track",
+                  nplateau=int(np.count_nonzero(np.diff(rel)) + 1),
                   span=int(rel.max() - rel.min()), nframes=len(offs))
-
-        nfr = len(offs)
-        cons = []
-        for f in range(nfr):
-            if self.stop.is_set():
-                self.emit("status", text="stopped", pct=0)
-                break
-            for b in range(8):
-                blk = prepare(s, int(offs[f]), b)
-                if blk is None:
-                    continue
-                if self.search:
-                    bits, lvl, ag = decode_block_anylevel(blk)
-                else:
-                    bits, ag, _ = decode_block(blk, lvls[f])
-                    lvl = lvls[f] if ag > 0.90 else None
-                if lvl is None:
-                    continue
-                r.recs.append((f, b, lvl, ag, mod.descramble(bits)))
-                if len(cons) < 120:
-                    cons.append(blk[:400])
-            if f % 4 == 0 or f == nfr - 1:
-                self.emit("progress", pct=18 + 78*(f + 1)/nfr,
-                          text=f"decoding frame {f+1}/{nfr} "
-                               f"- {len(r.recs)} blocks",
-                          const=np.concatenate(cons[-40:]) if cons else None,
-                          nblocks=len(r.recs))
-
-        if cons:
-            r.const = np.concatenate(cons)
         if r.recs:
             r.payload = np.packbits(
                 np.concatenate([x[4] for x in r.recs])).tobytes()

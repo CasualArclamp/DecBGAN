@@ -107,10 +107,15 @@ rather than guessing it. Result, per block index:
     fixed UW level : b0 68%   b1-b7  0-14%
     level search   : b0 87%   b1-b7 75-93%
 
-Whole capture: **1541 / 3928 blocks (39.2%)**, flat across block indices
-(b0 221, b1 192, b2 189, b3 192, b4 188, b5 194, b6 185, b7 180), median
-parity agreement 0.965. The prior decoder recovered 222 blocks, essentially
-all block 0 -- which matches our b0 count of 221 almost exactly.
+Whole capture at the time: **1541 / 3928 blocks (39.2%)**, flat across block
+indices (b0 221, b1 192, b2 189, b3 192, b4 188, b5 194, b6 185, b7 180),
+median parity agreement 0.965. The prior decoder recovered 222 blocks,
+essentially all block 0 -- which matches our b0 count of 221 almost exactly.
+
+> **Superseded.** 39.2% was a bug, not a ceiling. Per-frame symbol timing
+> takes the same capture to **98.5%** -- see "The 39% ceiling was a bug" at
+> the end of this document. The figures in this section are kept as the
+> before state.
 
 ```bash
 python tools/decode_wav.py E:/SDRPPrecordings/BGAN19.wav
@@ -314,3 +319,89 @@ earlier agreement was two carriers sharing a beam, not a constraint.
 part: clause 5.4.3.5 defines f-bearer as the Forward Bearer Number *within*
 the Bearer Control, so two bearers under one BCt is exactly the expected
 shape.
+
+## The 39% ceiling was a bug: one timing phase for the whole capture
+
+Yield went from **39.2% to 98.5%** on BGAN19 by fixing a single wrong
+assumption. Worth recording in full, because three plausible hypotheses were
+tested and disproved first, and each disproof was itself the clue.
+
+### What it was
+
+`recv.extract_symbols` computes `pos = tau0 + period*arange(n)` — one timing
+phase, chosen at t=0, applied to all 39 seconds.
+
+We already knew this recording drops samples (that is the offset staircase).
+At 4 samples/symbol, losing N samples shifts the symbol timing by
+`(N mod 4)/4` of a symbol. The whole-symbol part shows up as a frame-offset
+step and was already handled. **The fractional remainder was invisible**, and
+it moved every subsequent sample off the eye centre for the rest of the
+capture.
+
+### Why the earlier hypotheses all failed
+
+| hypothesis | test | result |
+|---|---|---|
+| fading | power, good vs failing frames | 0.41 dB apart; whole capture spans 1.7 dB |
+| lost acquisition | retry at neighbouring good frame's offset | 3 of 126 fixed |
+| tracker window too narrow | full 12096-position UW search + decode | 0 of 30 recovered |
+| sample drop mid-frame | per-block offset search within a frame | 0 of 10 showed split |
+
+Every one of those searched **integer symbol positions**. A fractional timing
+error is the one thing none of them could see. The tests were sound; they were
+all looking in the same wrong dimension.
+
+An estimator trap on the way: per-frame EVM-to-nearest-constellation-point
+*saturates*. Random symbols still land within half a grid spacing, so the
+metric bottoms out near 0.4 and reports ~8 dB no matter how bad the frame is.
+That produced an apparent contradiction — failing frames "at 8.34 dB" when
+block 0 (always L3) needs only 3.22 dB — which was an artifact, not a finding.
+
+### The proof
+
+Sweeping the timing phase over one symbol period and re-decoding:
+
+    tau shift     dead run A    dead run B    known-good run
+        0.000       0/80          0/80            80/80
+        0.500      50/80         45/80             0/80
+        0.625      80/80         80/80             0/80
+        0.875       0/80          0/80            31/80
+
+Two runs yielding **nothing** go to **100%** at a 5/8-symbol shift, and a run
+already at 98.9% collapses to 0% at that same shift. The symmetry is what
+makes it conclusive: this is a timing-phase effect, not a lucky search.
+
+### The fix
+
+`survey_taus` evaluates 8 timing phases per frame and picks the best by
+differential-UW correlation — no trial decoding needed, because the metric
+tracks timing closely (38 -> 81 on a dead run at the right phase).
+`decode_capture` then decodes each frame at its own phase, iterating one phase
+at a time so memory stays flat. `--ntau 1` restores the old behaviour.
+
+Unexpected bonus: the chosen phase wanders continuously, not only at dropouts
+— all 8 phases are used roughly evenly (`[75, 69, 63, 56, 43, 47, 55, 83]`).
+That is the residual -0.3 ppm clock error, worth about half a symbol across
+39 s. Per-frame timing absorbs it for free.
+
+### Result, and confirmation the extra blocks are real
+
+                              before      after
+    blocks decoded         1541/3928   3868/3928
+                              39.2%       98.5%
+    per block index      b0 221..b7 180   b0 490..b7 474
+    payload                   680 kB     1749 kB
+    IPv4 packets carved           71        230
+    printable runs               184        830
+
+The independent checks scale exactly as they should, which is the real
+evidence — a decoder inventing blocks would not:
+
+    BulletinBoards found          13         28   (of 29 possible)
+    frame-no offset             2008       2008   (unchanged)
+    broadcast period          17 fr      17 fr    (unchanged)
+    AVP level prediction    103 / 0    219 / 0    (agree / disagree)
+
+Newly recovered content includes Windows Update and Microsoft PKI URLs, HTTP
+headers with `x-rewritten-path`, and a satellite ISP's content-filter block
+page ("...contact your Satellite Service Administrator or Provider").

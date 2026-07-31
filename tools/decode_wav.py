@@ -37,8 +37,13 @@ MOS, STEP, UWLEN, DAT, GRP = 12096, 137, 40, 136, 11
 
 # --- front end ---------------------------------------------------------------
 
-def front_end(path, secs=None, up=2, sps=4):
-    """Raw WAV -> unit-power symbol stream. Returns (symbols, info dict)."""
+def channelise(path, secs=None, up=2, sps=4):
+    """Raw WAV -> matched-filtered stream at `sps`, plus clock estimate.
+
+    Returns (y, fs, rs_est, tau0, info). Symbol extraction is deliberately
+    NOT done here -- see symbols_at / survey_taus for why the timing phase
+    cannot be fixed once for the whole capture.
+    """
     x, sr = recv.load_wav_iq(path, secs=secs)
     x = x - x.mean()
     raw_sr, raw_n = sr, len(x)
@@ -50,13 +55,31 @@ def front_end(path, secs=None, up=2, sps=4):
 
     y, fs, centre = recv.channelize(x, sr, sps=sps)
     rs_est, tau0 = recv.estimate_symbol_clock(y, fs)
-    s = recv.extract_symbols(y, fs, rs_est, tau0)
+    info = dict(raw_sr=raw_sr, raw_n=raw_n, secs=raw_n/raw_sr, sr=sr,
+                centre=centre, rs=rs_est,
+                ppm=(rs_est - spec.F80T45X8B.rs)/spec.F80T45X8B.rs*1e6,
+                nframes=int(len(y)/(fs/rs_est))//MOS)
+    return y, fs, rs_est, tau0, info
+
+
+def symbols_at(y, fs, rs_est, tau, dtype=np.complex128):
+    """Symbol stream sampled at timing phase `tau` (in samples)."""
+    s = recv.extract_symbols(y, fs, rs_est, tau)
     s = s/np.sqrt(np.mean(np.abs(s)**2))
+    return s.astype(dtype)
+
+
+def front_end(path, secs=None, up=2, sps=4):
+    """Backwards-compatible single-tau front end. Returns (symbols, info).
+
+    Prefer decode_capture(): a single global timing phase loses most of the
+    capture on any recording with dropped samples.
+    """
+    y, fs, rs_est, tau0, info = channelise(path, secs, up, sps)
+    s = symbols_at(y, fs, rs_est, tau0)
     m4 = recv.timing_quality(s)
-    return s, dict(raw_sr=raw_sr, raw_n=raw_n, secs=raw_n/raw_sr, sr=sr,
-                   centre=centre, rs=rs_est,
-                   ppm=(rs_est - spec.F80T45X8B.rs)/spec.F80T45X8B.rs*1e6,
-                   m4=m4, esn0=recv.esn0_from_m4(m4), nframes=len(s)//MOS)
+    info.update(m4=m4, esn0=recv.esn0_from_m4(m4), nframes=len(s)//MOS)
+    return s, info
 
 
 # --- frame acquisition -------------------------------------------------------
@@ -170,6 +193,110 @@ def decode_block(blk, level, n0=0.5, iters=8):
     return bits[:t.D], ag, verify_block(bits, t, llr)
 
 
+TAU_STEPS = 8
+
+
+def survey_taus(y, fs, rs_est, tau0, ntau=TAU_STEPS, win=320, levels=None):
+    """Per frame, find the best (timing phase, frame offset) pair.
+
+    This exists because `extract_symbols` applies one timing phase to the
+    whole capture, and that is wrong on any recording with dropped samples.
+    At 4 samples/symbol, losing N samples shifts the symbol timing by
+    (N mod 4)/4 of a symbol. Only the whole-symbol part shows up as a frame
+    offset step; the fractional remainder moves every later sample off the
+    eye centre and no integer-offset search can undo it.
+
+    Measured on BGAN19: two runs of frames yielding 0/80 blocks with a global
+    tau yield 80/80 at a shift of 5/8 symbol, while a run that was already at
+    80/80 collapses to 0/80 at that same shift. The effect is real, large, and
+    the dominant cause of lost data -- far more than fading, which accounts
+    for 0.41 dB across the whole capture.
+
+    The differential-UW metric tracks it closely (38 -> 81 on a dead run at
+    the correct phase), so the phase can be found by correlation rather than
+    by trial decoding.
+
+    Returns (tau_idx, offs, lvls, mets), one entry per frame.
+    """
+    levels = levels or spec.LEVELS_F80T45X8B
+    pats = {lv: diff_uw(lv) for lv in levels}
+    period = fs/rs_est
+
+    nfr = None
+    best = None
+    for k in range(ntau):
+        s = symbols_at(y, fs, rs_est, tau0 + (k/ntau)*period, np.complex64)
+        d = np.empty_like(s)
+        d[0] = 0
+        d[1:] = s[1:]*np.conj(s[:-1])
+        if nfr is None:
+            nfr = len(s)//MOS - 1
+            best = (np.zeros(nfr, int), np.zeros(nfr, int),
+                    [None]*nfr, np.full(nfr, -1.0))
+        got = _corr(d, 1, MOS, pats)          # acquire on this phase
+        off = got[1] if got else 0
+        for f in range(nfr):
+            lo = max(1, off + f*MOS - win) if f else max(1, off - 4)
+            g = _corr(d, lo, 2*win if f else 8, pats)
+            if g is None:
+                continue
+            m, p, lv = g
+            if m > best[3][f]:
+                best[0][f], best[1][f], best[2][f], best[3][f] = k, p, lv, m
+            off = p - f*MOS
+    return best
+
+
+def decode_capture(path, secs=None, thr=0.90, level=None, search_levels=True,
+                   ntau=TAU_STEPS, progress=None):
+    """Full chain with per-frame timing recovery. Returns (records, info).
+
+    records: list of (frame, block, level, agreement, payload_bits)
+    """
+    y, fs, rs_est, tau0, info = channelise(path, secs)
+    if progress:
+        progress(0.10, "searching timing phases")
+    tau_idx, offs, lvls, mets = survey_taus(y, fs, rs_est, tau0, ntau)
+    nfr = len(offs)
+    info["nframes"] = nfr
+    info["tau_hist"] = np.bincount(tau_idx, minlength=ntau).tolist()
+
+    period = fs/rs_est
+    recs = []
+    const = []
+    done = 0
+    for k in range(ntau):
+        which = np.flatnonzero(tau_idx == k)
+        if not len(which):
+            continue
+        s = symbols_at(y, fs, rs_est, tau0 + (k/ntau)*period)
+        if k == 0:
+            m4 = recv.timing_quality(s)
+            info.update(m4=m4, esn0=recv.esn0_from_m4(m4))
+        for f in which:
+            for b in range(8):
+                blk = prepare(s, int(offs[f]), b)
+                if blk is None:
+                    continue
+                if search_levels and not level:
+                    bits, lv, ag = decode_block_anylevel(blk, thr)
+                else:
+                    bits, ag, _ = decode_block(blk, level or lvls[f])
+                    lv = (level or lvls[f]) if ag > thr else None
+                if lv is not None:
+                    recs.append((int(f), b, lv, ag, mod.descramble(bits)))
+                    if len(const) < 150:
+                        const.append(blk[:400].astype(np.complex64))
+            done += 1
+            if progress and done % 4 == 0:
+                progress(0.10 + 0.88*done/nfr,
+                         f"decoded {done}/{nfr} frames - {len(recs)} blocks",
+                         np.concatenate(const[-40:]) if const else None)
+    recs.sort(key=lambda r: (r[0], r[1]))
+    info["const"] = np.concatenate(const) if const else np.zeros(0, complex)
+    return recs, info, (tau_idx, offs, lvls, mets)
+
+
 def decode_block_anylevel(blk, thr=0.90, levels=None):
     """Identify the coding level by trial decode. Returns (bits, level, ag).
 
@@ -204,6 +331,9 @@ def main():
     ap.add_argument("--secs", type=float, default=None)
     ap.add_argument("--thr", type=float, default=0.90)
     ap.add_argument("--level", default=None, help="force coding level")
+    ap.add_argument("--ntau", type=int, default=TAU_STEPS,
+                    help="timing phases to search per frame (1 = old "
+                         "single-phase behaviour)")
     ap.add_argument("--no-search-levels", dest="search_levels",
                     action="store_false",
                     help="use the UW level for all 8 blocks (much faster, "
@@ -211,42 +341,37 @@ def main():
     ap.add_argument("--out", default="work/wav_payload.bin")
     a = ap.parse_args()
 
-    s, info = front_end(a.path, secs=a.secs)
+    def prog(frac, text):
+        print(f"\r  [{100*frac:5.1f}%] {text}          ", end="", flush=True)
+
+    recs, info, (tau_idx, offs, lvls, mets) = decode_capture(
+        a.path, secs=a.secs, thr=a.thr, level=a.level,
+        search_levels=a.search_levels, ntau=a.ntau, progress=prog)
+    print()
     print(f"{Path(a.path).name}: {info['secs']:.1f} s @ {info['raw_sr']/1e3:.0f} kHz")
     print(f"  centre {info['centre']:+.1f} Hz   rs {info['rs']:.3f} Bd "
           f"({info['ppm']:+.1f} ppm)")
     print(f"  M4/M2^2 {info['m4']:.3f} -> Es/N0 {info['esn0']:.1f} dB   "
           f"{info['nframes']} frames")
 
-    offs, lvls, mets = track_offsets(s)
     rel = offs - np.arange(len(offs))*MOS
-    steps = np.flatnonzero(np.diff(rel)) + 1
-    print(f"  frame offset: {len(steps)+1} plateau(s), "
-          f"range {rel.min()}..{rel.max()}, span {rel.max()-rel.min()} symbols")
-    for i, (b, e) in enumerate(zip([0]+list(steps), list(steps)+[len(rel)])):
+    steps = np.flatnonzero(np.diff(rel) | np.diff(tau_idx)) + 1
+    print(f"  timing phases used (of {a.ntau}): {info['tau_hist']}")
+    print(f"  frame offset: {len(steps)+1} run(s), "
+          f"span {rel.max()-rel.min()} symbols")
+    for b, e in list(zip([0]+list(steps), list(steps)+[len(rel)]))[:24]:
         print(f"    frames {b:4d}..{e-1:4d}  offset {rel[b]:6d}  "
-              f"level {lvls[b]:>3}  metric {np.median(mets[b:e]):5.1f}")
+              f"tau {tau_idx[b]}/{a.ntau}  level {lvls[b]:>3}  "
+              f"metric {np.median(mets[b:e]):5.1f}")
 
-    nok = ntot = 0
-    out, recs = [], []
+    ntot = len(offs)*8
+    nok = len(recs)
     bybl = np.zeros(8, int)
-    for f in range(len(offs)):
-        for b in range(8):
-            blk = prepare(s, int(offs[f]), b)
-            if blk is None:
-                continue
-            ntot += 1
-            if a.level or not a.search_levels:
-                bits, ag, _ = decode_block(blk, a.level or lvls[f])
-                lvl = (a.level or lvls[f]) if ag > a.thr else None
-            else:
-                bits, lvl, ag = decode_block_anylevel(blk, a.thr)
-            if lvl is None:
-                continue
-            nok += 1
-            bybl[b] += 1
-            recs.append((f, b, lvl, ag, len(out)))
-            out.append(mod.descramble(bits))
+    out = []
+    for f, b, lv, ag, bits in recs:
+        bybl[b] += 1
+        out.append(bits)
+    recs = [(f, b, lv, ag, i) for i, (f, b, lv, ag, _) in enumerate(recs)]
     print(f"\n  {nok}/{ntot} blocks decoded ({100*nok/max(ntot,1):.1f}%)")
     print("  per block index: " +
           "  ".join(f"b{i} {bybl[i]}" for i in range(8)))
@@ -264,7 +389,7 @@ def main():
                             agree=np.array([r[3] for r in recs]),
                             bits=np.concatenate(out).astype(np.uint8),
                             lens=np.array([len(o) for o in out]),
-                            offs=offs, mets=mets)
+                            offs=offs, mets=mets, tau=tau_idx)
         print(f"  wrote {p} ({len(payload)} bytes) and {p.with_suffix('.npz')}")
     return 0
 
