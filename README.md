@@ -79,6 +79,14 @@ PDF), from the same place.
 
 ### GUI
 
+Double-click **`start.cmd`** on Windows, or run **`./start.sh`** on
+Linux/macOS. Either one checks for a working Python, installs the
+dependencies on first run, warns if the ETSI tables are missing, and opens the
+GUI. Both pass arguments through, so `start.cmd C:\path\capture.wav` opens
+with that file already selected.
+
+Or invoke it directly:
+
 ```bash
 python tools/gui.py path/to/capture.wav
 ```

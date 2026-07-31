@@ -1,0 +1,5 @@
+# batch files must be CRLF or cmd mis-parses multi-line blocks
+*.cmd text eol=crlf
+*.bat text eol=crlf
+# shell scripts must be LF or the shebang breaks
+*.sh text eol=lf
