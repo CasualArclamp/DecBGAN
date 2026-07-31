@@ -254,6 +254,8 @@ class App(tk.Tk):
                         variable=self.searchvar,
                         command=lambda: self._probe_path()).pack(
                             side="left", padx=8)
+        ttk.Button(top, text="Scan",
+                   command=self._scan).pack(side="left", padx=(4, 0))
         self.btn = ttk.Button(top, text="Decode", command=self._start)
         self.btn.pack(side="left", padx=4)
         ttk.Button(top, text="Stop", command=self.stop.set).pack(side="left")
