@@ -96,18 +96,29 @@ clamped and logged.
 Leave **search levels** on. Off is ~9x faster but only recovers block 0,
 which is about an eighth of the data.
 
-Decode cost on the development machine is about **9.8 s of compute per second
+**Scan** runs the front end, framing and timing search but no turbo decoding —
+about a ninth of the cost of a full decode (16 s vs 145 s on a 39 s capture).
+It reports which unique words are present and where, how the framing and
+timing move, and a conservative yield forecast, so a long capture can be
+triaged before you commit to it.
+
+Decode cost on the development machine is about **3.0 s of compute per second
 of capture** with level search, **1.0 s/s** without — so a 60 s capture is
-roughly 10 minutes. The estimate shown updates when you toggle level search.
+roughly 3 minutes. The estimate shown updates when you toggle level search.
 
 ### Command line
 
 ```bash
+python tools/decode_wav.py capture.wav --survey     # fast scan, no decoding
 python tools/decode_wav.py capture.wav              # decode, write payload
 python tools/parse_bulletin.py work/payload.npz     # bearer control
 python tools/scan_bearers.py capture.wav            # what carriers are present
 python tests/waterfall.py                           # codec vs Annex B2
 ```
+
+`--survey` prints the unique words seen, the framing runs with their offsets
+and timing phases, the UW-metric distribution and a yield forecast, in about a
+ninth of the time a full decode takes.
 
 ### Capture settings
 

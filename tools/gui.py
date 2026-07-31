@@ -34,8 +34,10 @@ from matplotlib.backends.backend_tkagg import (                # noqa: E402
 from scipy.signal import welch                                # noqa: E402
 
 from bgan import spec, mod, recv, bulletin, pcapout           # noqa: E402
-from tools.decode_wav import decode_capture, channelise, MOS  # noqa: E402
+from tools.decode_wav import (decode_capture, survey,          # noqa: E402
+                              channelise, MOS)
 
+NL = chr(10)
 BG = "#1c1f26"
 FG = "#d8dee9"
 ACC = "#5fb3d4"
@@ -154,8 +156,8 @@ def _freq_from_name(path):
 # framing are paid either way.
 #
 # A guide for choosing a length, not a promise; a slower machine will differ.
-EST_SEC_PER_SEC = 9.84
-EST_NOSEARCH_RATIO = 0.11
+EST_SEC_PER_SEC = 2.96
+EST_NOSEARCH_RATIO = 0.35
 
 
 def probe_wav(path):
@@ -329,6 +331,72 @@ class App(tk.Tk):
             filetypes=[("WAV IQ", "*.wav"), ("All", "*.*")])
         if p:
             self.pathvar.set(p)
+
+    def _scan(self):
+        """Fast survey: framing, unique words and timing, no turbo decoding.
+
+        Roughly a ninth of the cost of a full decode (16 s vs 145 s on a 39 s
+        capture), so a long recording can be triaged before committing to it.
+        """
+        p = self.pathvar.get().strip('"')
+        if not p or not os.path.exists(p):
+            messagebox.showerror("No capture", "Pick a .wav IQ capture first.")
+            return
+        if self.worker and self.worker.is_alive():
+            return
+        try:
+            secs = float(self.secsvar.get())
+        except ValueError:
+            secs = None
+        self.statvar.set("scanning...")
+        self.pbar["value"] = 0
+        self.update_idletasks()
+        try:
+            info, (tau_idx, offs, lvls, mets) = survey(p, secs=secs)
+        except Exception as exc:
+            self._log(f"scan failed: {exc}")
+            self.statvar.set("scan failed - see Log")
+            return
+        self.pbar["value"] = 100
+        uw = ", ".join(f"{k} x{v}" for k, v in
+                       sorted(info["uw_levels"].items(),
+                              key=lambda kv: -kv[1]))
+        self.statvar.set(f"scan: {info['nframes']} frames, "
+                         f">={100*info['est_yield']:.0f}% forecast")
+
+        rows = [
+            f"--- scan {Path(p).name} ---",
+            f"  {info['secs']:.1f} s, centre {info['centre']:+.1f} Hz, "
+            f"rs {info['rs']:.3f} Bd ({info['ppm']:+.2f} ppm)",
+            f"  Es/N0 {info['esn0']:.1f} dB, {info['nframes']} frames",
+            f"  unique words: {uw}",
+            f"  timing phases: {info['tau_hist']}",
+            f"  UW metric median {info['metric_med']:.1f}, "
+            f"p90 {info['metric_p90']:.1f}",
+            f"  forecast at least ~{100*info['est_yield']:.0f}% of blocks "
+            f"(conservative)",
+            f"  {len(info['runs'])} framing run(s)",
+        ]
+        for r in info["runs"][:40]:
+            rows.append(f"    frames {r['start']:4d}..{r['end']:<4d} "
+                        f"offset {r['offset']:6d} tau {r['tau']} "
+                        f"UW {r['level']:>3} metric {r['metric']:5.1f}")
+        if len(info["runs"]) > 40:
+            rows.append(f"    ... {len(info['runs'])-40} more")
+        self.tab_log.insert("end", NL + NL.join(rows) + NL)
+        self.tab_log.see("end")
+
+        extra = NL.join([
+            "", "", "SCAN (no decoding)",
+            f"  unique words    {uw}",
+            f"  framing runs    {len(info['runs'])}",
+            f"  UW metric       median {info['metric_med']:.1f}, "
+            f"p90 {info['metric_p90']:.1f}",
+            f"  forecast        >= {100*info['est_yield']:.0f}% of blocks",
+        ])
+        self._show_info({**info, "path": p,
+                         "file_hz": _freq_from_name(p),
+                         "occ_bw": float("nan")}, extra)
 
     def _probe_path(self):
         """Read the WAV header so the length is known before decoding.
