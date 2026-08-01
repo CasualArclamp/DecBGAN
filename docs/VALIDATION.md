@@ -405,3 +405,79 @@ evidence — a decoder inventing blocks would not:
 Newly recovered content includes Windows Update and Microsoft PKI URLs, HTTP
 headers with `x-rewritten-path`, and a satellite ISP's content-filter block
 page ("...contact your Satellite Service Administrator or Provider").
+
+## Reading the coding levels instead of searching for them
+
+The per-block coding levels were found by trial decode. They can now be *read*
+on 88% of frames, from the BCtPDU layer.
+
+### The header decodes exactly as the spec says
+
+Clause 5.1.4 gives the FwdBCtPDUHeader as bct-sdu-follows(1),
+length-present(1), bct-pdu-addr-type(2), comsig-or-ext-addr(1), then a 3-bit
+type. On BGAN19, block 0's first octet is **0xc9 in all 490 payloads**, which
+decodes as:
+
+    bct-sdu-follows = 1     length-present = 1
+    bct-pdu-addr-type = 0 = broadcast     com-sig-type = 1
+
+Broadcast with a length field is precisely what clause 5.4.3.0 requires of the
+PDU carrying a BulletinBoard. Blocks 1-7 are mostly `tbcn-id` addressed, i.e.
+per-connection user data, which is also what one would expect.
+
+### The first BCtSDU is at bit 24, and often it is the AVP
+
+On frames not carrying a BulletinBoard, the first BCtSDU is the
+ForwardBearerCodeRateParam itself, so the levels are simply there to be read.
+
+This is established by prediction, not assertion -- which matters, because an
+earlier blind scan for the same tag matched 98/98 frames on pure noise and
+looked convincing. Scored against 3868 levels obtained independently by trial
+decode:
+
+    bit offset 0, byte 3 :  3387/3409   99.35%
+    next best position   :               38.3%
+    assume L3 everywhere :   921/3868   23.8%
+
+No other of the ~320 (bit-shift, byte-position) combinations tested comes
+close. The 22 misses are absorbed by using the read value as the first
+candidate for trial decode rather than trusting it, so the result is lossless.
+
+### Result
+
+    frames where levels are read, not searched   432/490  (88.2%)
+    full decode of BGAN19                        3868/3928 blocks in 59 s
+
+Decode cost, same file and same output throughout:
+
+    all ten levels tried per block          9.84 s/s   388 s
+    + level predictor, stop at first hit    2.96 s/s   116 s
+    + code-rate AVP read from block 0       1.50 s/s    59 s
+    (floor: no level identification at all) 1.03 s/s
+
+6.6x faster than where this started, with byte-identical output.
+
+### What did not work
+
+**Chaining PDUs by the length field.** If the length octet is "content length
+from end of header to CRC", then walking header -> content -> next header
+should repeatedly land on something that decodes as a header. It does not:
+159 of 490 payloads overrun the block, and the second PDU's first octet is
+scattered with no dominant value. The control settles it -- shuffling the
+bytes of each payload gives *fewer* overruns (10.5%) than the real data
+(32%), so this is not a real structure being read slightly wrong. The length
+field is either not where Figure 5.22 puts it, or does not mean what
+clause 5.1.5.3 says here.
+
+**Carrying levels forward from the last BulletinBoard.** The AVP applies to
+its own frame: prediction is 100% correct on the BulletinBoard's frame and
+~50% one frame later, and every consecutive BulletinBoard differs.
+
+**Parsing a BulletinBoard on frames that have none.** Calling `bulletin.parse`
+wherever byte 3 was not a code-rate tag gave 56% level accuracy, against
+99.35% for the direct AVP read. The BulletinBoard path is only trustworthy on
+frames confirmed by the frame-no check, where it scores 219/0.
+
+So the BCtPDU header is understood and the first SDU is located, but SDU
+chaining beyond the first is not. Full SDU demux still needs the missing
+parts 3-2..3-8.

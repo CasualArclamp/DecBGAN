@@ -19,7 +19,8 @@ Written in Python with numba for the turbo decoder. No compiler needed.
 - **FEC** — the full SRCC turbo codec: Annex C.1 turbo interleaver, Annex C.2
   puncturing / channel interleaving / QAM mapping, max-log-MAP BCJR decoding
   at all ten coding levels (L8…H6)
-- **Bearer control** — BulletinBoard SDU parsing, AVP list walking,
+- **Bearer control** — FwdBCtPDU header decoding, BulletinBoard SDU parsing,
+  AVP list walking,
   `ForwardBearerCodeRateParam` extraction (TS 102 744-3-1)
 - **Output** — printable-string extraction, IPv4 carving with header-checksum
   validation, pcap export
@@ -111,9 +112,10 @@ It reports which unique words are present and where, how the framing and
 timing move, and a conservative yield forecast, so a long capture can be
 triaged before you commit to it.
 
-Decode cost on the development machine is about **3.0 s of compute per second
-of capture** with level search, **1.0 s/s** without — so a 60 s capture is
-roughly 3 minutes. The estimate shown updates when you toggle level search.
+Decode cost on the development machine is about **1.5 s of compute per second
+of capture**, so a 60 s capture is about 90 seconds. Coding levels are read
+from the BCtPDU layer on ~88% of frames and only searched on the rest.
+The estimate shown updates when you toggle level search.
 
 ### Command line
 

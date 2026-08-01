@@ -29,7 +29,7 @@ from collections import Counter
 from scipy.signal import resample_poly
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from bgan import spec, mod, recv, tx
+from bgan import spec, mod, recv, tx, bctrl
 from bgan import decoder as dec
 from bgan.pipeline import verify_block
 from bgan.turbo import map_to_symbols, turbo_encode
@@ -341,17 +341,25 @@ def decode_capture(path, secs=None, thr=0.90, level=None, search_levels=True,
             m4 = recv.timing_quality(s)
             info.update(m4=m4, esn0=recv.esn0_from_m4(m4))
         for f in which:
+            hints = None
             for b in range(8):
                 blk = prepare(s, int(offs[f]), b)
                 if blk is None:
                     continue
                 if search_levels and not level:
-                    bits, lv, ag = decode_block_fast(blk, b, pred, thr)
+                    bits, lv, ag = decode_block_fast(
+                        blk, b, pred, thr,
+                        hints[b] if hints else None)
                 else:
                     bits, ag, _ = decode_block(blk, level or lvls[f])
                     lv = (level or lvls[f]) if ag > thr else None
                 if lv is not None:
-                    recs.append((int(f), b, lv, ag, mod.descramble(bits)))
+                    pay = mod.descramble(bits)
+                    recs.append((int(f), b, lv, ag, pay))
+                    if b == 0:
+                        # block 0 carries this frame's code-rate AVP,
+                        # so blocks 1-7 need not be searched blind
+                        hints = levels_from_block0(pay, lv)
                     if len(const) < 150:
                         const.append(blk[:400].astype(np.complex64))
             done += 1
@@ -402,10 +410,12 @@ class LevelPredictor:
         if uw_level:
             self.last[0] = uw_level          # the UW tells us block 0 free
 
-    def order(self, b):
+    def order(self, b, hint=None):
         out = []
+        if hint:
+            out.append(hint)
         p = self.last.get(b)
-        if p:
+        if p and p not in out:
             out.append(p)
         for lv, _ in self.seen[b].most_common():
             if lv not in out:
@@ -420,7 +430,50 @@ class LevelPredictor:
         self.last[b] = lv
 
 
-def decode_block_fast(blk, b, pred, thr=0.90):
+BCTPDU_HDR_BITS = 24        # first BCtSDU starts here; measured, see below
+
+
+def levels_from_block0(payload_bits, uw_level="L3", nblocks=8):
+    """Read this frame's per-block coding levels out of block 0. None if absent.
+
+    The first BCtSDU sits at bit 24 of the block-0 payload, immediately after
+    a 3-octet FwdBCtPDUHeader. On BGAN19 that header is 0xc9 in all 490
+    payloads, which decodes exactly as clause 5.1.4 says it should:
+    bct-sdu-follows=1, length-present=1, bct-pdu-addr-type=broadcast -- which
+    is precisely what clause 5.4.3.0 requires of the PDU carrying a
+    BulletinBoard.
+
+    On frames that are not carrying a BulletinBoard, that first SDU is the
+    ForwardBearerCodeRateParam itself, so the levels can simply be read.
+
+    This is validated by prediction rather than by assertion, which matters
+    because an earlier blind scan for the same tag matched 98/98 frames on
+    noise. Scored against 3868 levels established independently by trial
+    decode, the AVP at bit 24 predicts **3387/3409 = 99.35%**, against 23.8%
+    for assuming L3 everywhere. No other bit offset or byte position comes
+    close: the next best manages 38%.
+
+    Returns the level list, or None when byte 3 is not a code-rate tag (which
+    is the BulletinBoard case, plus a handful of frames with neither).
+    """
+    b = np.asarray(payload_bits, dtype=np.uint8)
+    p = BCTPDU_HDR_BITS//8
+    by = np.packbits(b[:len(b)//8*8]).tobytes()
+    if p >= len(by):
+        return None
+    tag = by[p]
+    if not (0x90 <= tag <= 0x97):          # not fwd-bearer-code-rate-len-N
+        return None
+    n = (tag & 7) + 1
+    if p + 1 + n > len(by):
+        return None
+    entries = bctrl.parse_fwd_code_rate(by[p:p + 1 + n])
+    if not entries:
+        return None
+    return bctrl.resolve_block_levels(uw_level, entries, nblocks)
+
+
+def decode_block_fast(blk, b, pred, thr=0.90, hint=None):
     """Trial-decode in predicted order, stopping at the first accepted level.
 
     Early stopping is safe here for a specific measured reason: across ~480
@@ -431,7 +484,7 @@ def decode_block_fast(blk, b, pred, thr=0.90):
 
     Returns (bits, level, agreement) or (None, None, 0.0).
     """
-    for lv in pred.order(b):
+    for lv in pred.order(b, hint):
         bits, ag, lr = decode_block(blk, lv)
         if ag > thr and lr:
             pred.note(b, lv)

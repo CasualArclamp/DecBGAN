@@ -156,8 +156,8 @@ def _freq_from_name(path):
 # framing are paid either way.
 #
 # A guide for choosing a length, not a promise; a slower machine will differ.
-EST_SEC_PER_SEC = 2.96
-EST_NOSEARCH_RATIO = 0.35
+EST_SEC_PER_SEC = 1.50
+EST_NOSEARCH_RATIO = 0.69
 
 
 def probe_wav(path):
