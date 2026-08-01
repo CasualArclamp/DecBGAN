@@ -50,8 +50,23 @@ def load_wav_iq(path, secs=None, offset=0.0):
 
 # --- carrier location --------------------------------------------------------
 
-def find_carrier(x, sr, rs=None, bw_factor=1.25):
-    """Locate the strongest carrier and return its centre offset in Hz."""
+def find_carriers(x, sr, rs=None, bw_factor=1.25, n=4, sep_factor=1.0):
+    """Candidate carrier centres, strongest first, separated by `sep_factor*bw`.
+
+    Returns a list of (centre_hz, integrated_power). Power ranks them, but
+    power is NOT a reliable way to choose between them: a capture can hold
+    several carriers, and the strongest is not always the one that decodes.
+    Measured on a two-carrier file, the stronger carrier (+103.4 kHz, 1.39x
+    the in-band power) yields a UW metric of 20 -- pure noise -- while the
+    weaker one at -98.5 kHz decodes cleanly at metric 60. Let the caller
+    probe each candidate and pick on evidence; see decode_wav.pick_carrier.
+
+    sep_factor must be >= 1: at 0.6 the suppression guard was narrower
+    than the signal, so each real carrier also produced phantom
+    candidates on its own shoulders at +/-113 kHz, which probe
+    identically because refine_centre pulls them back to the same
+    carrier anyway.
+    """
     rs = rs or spec.F80T45X8B.rs
     bw = rs*bw_factor
     fr, P = welch(x, sr, nperseg=32768, return_onesided=False, detrend=False)
@@ -60,8 +75,28 @@ def find_carrier(x, sr, rs=None, bw_factor=1.25):
     Ps = np.convolve(P, np.ones(64)/64, "same")
     n0 = np.median(np.sort(Ps)[:len(Ps)//5])
     win = max(1, int(bw/(fr[1]-fr[0])))
-    integ = np.convolve(np.maximum(Ps-n0, 0), np.ones(win), "same")
-    return float(fr[int(np.argmax(integ))])
+    integ = np.convolve(np.maximum(Ps - n0, 0), np.ones(win), "same")
+
+    out = []
+    guard = int(sep_factor*win)
+    work = integ.copy()
+    for _ in range(n):
+        j = int(np.argmax(work))
+        if work[j] <= 0:
+            break
+        out.append((float(fr[j]), float(work[j])))
+        work[max(0, j - guard):j + guard + 1] = -1.0
+    return out
+
+
+def find_carrier(x, sr, rs=None, bw_factor=1.25):
+    """Locate the strongest carrier and return its centre offset in Hz.
+
+    Strongest only. Prefer find_carriers() plus a decodability probe when the
+    capture may hold more than one carrier.
+    """
+    c = find_carriers(x, sr, rs, bw_factor, n=1)
+    return c[0][0] if c else 0.0
 
 
 def refine_centre(x, sr, rs=None, iters=3):
@@ -76,7 +111,14 @@ def refine_centre(x, sr, rs=None, iters=3):
         b = np.abs(fr) < rs*0.75
         n0 = np.median(P[(np.abs(fr) > rs*0.72) & (np.abs(fr) < rs*0.95)])
         w = np.maximum(P[b]-n0, 0)
-        d = float(np.sum(fr[b]*w)/np.sum(w))
+        tot = float(np.sum(w))
+        if not np.isfinite(tot) or tot <= 0:
+            # Nothing above the noise floor in this band, so there is no
+            # centroid to move to. Returning NaN here poisons every later
+            # stage silently -- it only surfaced once carrier candidates
+            # started being probed at positions that hold no signal.
+            break
+        d = float(np.sum(fr[b]*w)/tot)
         x = x*np.exp(-2j*np.pi*d*n/sr)
         total += d
     return x, total

@@ -649,3 +649,89 @@ linear. This is the only piece still missing; the coding chain itself is
 verified correct.
 
 `tools/decode_real.py` holds the working chain.
+
+## Carrier selection on multi-carrier captures (Aug 2026)
+
+Reported symptom: several 512 kHz captures failed to decode, apparently
+locking onto interference beside the signal. The cause turned out to be two
+different things, neither of them RFI.
+
+### 1. The strongest carrier is not always the right one
+
+`baseband_1550398000Hz` holds **two** F80T4.5X-8B carriers, at -98.5 kHz and
++103.4 kHz. Neither is at 0 Hz, and `find_carrier` picked the stronger
+(+103.4 kHz has 1.39x the in-band power). That one probes as pure noise:
+
+    centre  -98.5 kHz  ->  rs   -0.6 ppm  UW metric 59.5  UW = R x98
+    centre +103.4 kHz  ->  rs -181.3 ppm  UW metric 20.4  UW = scattered
+
+Power is the wrong selector. `pick_carrier` now probes each candidate with a
+cheap UW correlation (no turbo decoding) and ranks by how far it stands above
+that capture's own noise floor, measured from deliberately wrong offsets in
+the same file. Carriers that decode sit at 2.5-3.5x; ones that do not sit at
+1.0-1.1x. A symbol clock more than 50 ppm from nominal is also disqualifying:
+the failures came back at -181 and +100 ppm, which is the estimator finding no
+tone and latching onto the edge of its search range.
+
+### 2. Some captures hold no F80T4.5X-8B carrier at all
+
+`Small BGAN baseband_1532200400Hz` contains **four 33.6 kBd carriers**
+(F80T1X-4B, 42 kHz) and no 151.2 kBd carrier. Decoding it produced noise and
+*still* reported a 97% yield forecast. Two fixes:
+
+- `NoCarrier` is raised, and both the CLI and GUI report what the capture
+  actually contains by symbol rate instead of failing obscurely.
+- The forecast was calibrated against the file's own 90th percentile, so a
+  capture where every frame scores ~20 had "100% of frames strong". It now
+  compares against the noise floor measured at wrong offsets in the same file.
+
+### Two bugs found while fixing the above
+
+**refine_centre returned NaN on an empty band.** `sum(fr*w)/sum(w)` with no
+power above the noise floor gives 0/0, and the NaN propagated silently through
+the whole chain. Latent since the beginning; it only surfaced once candidate
+carriers started being probed at positions holding no signal.
+
+**Phantom candidates on a carrier's own shoulders.** The suppression guard in
+`find_carriers` sits one bandwidth from each peak, so a single carrier also
+produces candidates at +/-189 kHz. Those probe almost identically -- ratios
+differing in the 4th decimal -- because `refine_centre` drags them back
+towards the same carrier, but only partway, leaving ~1.3 kHz of residual
+offset. That is invisible in a spectrum and fatal to the pilots: at 1.3 kHz
+the phase advances ~7.4 rad between pilots 137 symbols apart, the unwrap in
+`prepare()` breaks, and a capture that decodes 944/984 blocks decodes 0.
+Candidates are now deduplicated on their *refined* centre, keeping the
+strongest of each group.
+
+### Results
+
+    capture                        before        after
+    1543.100 (lots of data)      944/984      944/984   unchanged
+    1547.298 (two carriers)       92/1184     173/984    7.8% -> 17.6%
+    1532.200 (33.6 kBd only)     noise+97%    NoCarrier, lists what is there
+    1550.398 (two carriers)      wrong one    right one picked, still 0 decoded
+    1543.100 (17-46-31)          0            0
+    1553.500                     0            0
+    BGAN19 / synthetic           unchanged    unchanged (4149/4149 bit-exact)
+
+### Still unexplained
+
+Three captures frame correctly and decode nothing. `1543.100_17-46-31` is the
+clearest case: a single clean carrier, peak SNR 19.9 dB (higher than the file
+that decodes 95.9%), timing tone 20.1 dB, UW metric 71.8 with L3 detected on
+all 123 frames -- and every block decodes at chance.
+
+Ruled out by measurement:
+
+- **carrier offset** -- residual CFO is +256, -253, -443 Hz, all inside the
+  552 Hz limit where the pilot unwrap breaks
+- **clipping** -- peaks reach 5-8% of full scale, zero samples near rail
+- **weak signal** -- 19.9 dB peak SNR, above the file that works
+- **adjacent carriers** -- scan_bearers finds exactly one carrier
+- **wrong bearer** -- F80T4.5X-8B is the only 151.2 kBd forward bearer defined
+
+What is measurably different is constellation quality after pilot correction:
+EVM 0.270 and 0.320 against 0.219 for the capture that decodes. So the symbols
+really are worse, but not for any reason yet identified. Next thing to try is
+the timing phase resolution (ntau) and the matched-filter roll-off, since both
+affect EVM without touching PSD SNR.

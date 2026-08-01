@@ -35,11 +35,126 @@ from bgan.pipeline import verify_block
 from bgan.turbo import map_to_symbols, turbo_encode
 
 MOS, STEP, UWLEN, DAT, GRP = 12096, 137, 40, 136, 11
+NL_ = chr(10)
+
+
+class NoCarrier(Exception):
+    """No candidate carrier looks like F80T4.5X-8B.
+
+    Carries the probe table so the caller can say what WAS found.
+    Raised rather than returning garbage: a capture holding only
+    33.6 kBd bearers used to decode to noise and still report a 97%
+    yield forecast."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        super().__init__(
+            "no F80T4.5X-8B carrier found among "
+            f"{len(rows)} candidate(s)")
 
 
 # --- front end ---------------------------------------------------------------
 
-def channelise(path, secs=None, up=2, sps=4):
+def probe_centre(x, sr, centre, sps=4, nframes=6):
+    """Cheap decodability probe for one candidate carrier. No turbo decoding.
+
+    Returns (metric, floor, rs_ppm, level, refined_centre). `metric` is the median
+    differential-UW correlation over a few frames; `floor` is the same
+    statistic at deliberately wrong offsets, which calibrates what noise looks
+    like in this capture rather than against a hardcoded number.
+    """
+    try:
+        y, fs, c = recv.channelize(x, sr, sps=sps, centre=centre)
+        rs, tau0 = recv.estimate_symbol_clock(y, fs)
+        s = symbols_at(y, fs, rs, tau0, np.complex64)
+    except Exception:
+        return 0.0, 1.0, float("inf"), None, centre
+    if not (np.isfinite(rs) and np.isfinite(tau0) and rs > 0):
+        return 0.0, 1.0, float("inf"), None, centre
+    d = np.empty_like(s)
+    d[0] = 0
+    d[1:] = s[1:]*np.conj(s[:-1])
+    pats = {lv: diff_uw(lv) for lv in spec.LEVELS_F80T45X8B}
+
+    nfr = min(nframes, len(s)//MOS - 1)
+    if nfr < 2:
+        return 0.0, 1.0, float("inf"), None, c
+    hits, floor, lvls = [], [], []
+    for f in range(nfr):
+        got = _corr(d, 1 + f*MOS, MOS, pats)
+        if got:
+            hits.append(got[0])
+            lvls.append(got[2])
+        off = _corr(d, 1 + f*MOS + MOS//3, MOS//8, pats)   # deliberately wrong
+        if off:
+            floor.append(off[0])
+    if not hits:
+        return 0.0, 1.0, float("inf"), None, c
+    lv = Counter(lvls).most_common(1)[0][0]
+    ppm = (rs - spec.F80T45X8B.rs)/spec.F80T45X8B.rs*1e6
+    return (float(np.median(hits)), float(np.median(floor) if floor else 1.0),
+            float(ppm), lv, float(c))
+
+
+def pick_carrier(x, sr, sps=4, ncand=4, min_ratio=1.8, max_ppm=50.0,
+                 dedupe_hz=8000.0):
+    """Choose among candidate carriers by decodability, not by power.
+
+    A capture can hold several carriers, and the strongest need not be the one
+    that decodes -- on a two-carrier file the stronger one is noise to this
+    decoder while the weaker one decodes cleanly. So probe each and rank by
+    how far its unique-word correlation stands above that capture's own noise
+    floor.
+
+    `min_ratio` is metric/floor. The floor is measured from deliberately wrong
+    offsets in the same capture, so this adapts instead of relying on an
+    absolute threshold. Observed: carriers that decode sit at 2.5-3.5x, ones
+    that do not sit at 1.0-1.1x.
+
+    `max_ppm` rejects a candidate whose symbol-clock estimate is implausible.
+    A real F80T4.5X-8B carrier measures within a couple of ppm; the failures
+    came back at -181 and +100 ppm, which is the estimator finding no tone and
+    latching onto the edge of its search range.
+
+    Returns (best_centre_or_None, table) where table is one row per candidate.
+    """
+    cands = recv.find_carriers(x, sr, n=ncand)
+    rows = []
+    for centre, power in cands:
+        m, fl, ppm, lv, refined = probe_centre(x, sr, centre, sps)
+        ratio = m/max(fl, 1e-9)
+        ok = ratio >= min_ratio and abs(ppm) <= max_ppm
+        rows.append(dict(centre=centre, refined=refined, power=power,
+                         metric=m, floor=fl, ratio=ratio, ppm=ppm,
+                         level=lv, ok=ok))
+
+    # Deduplicate on the REFINED centre, not the raw one. The suppression
+    # guard in find_carriers sits one bandwidth from each peak, so a single
+    # carrier also throws phantom candidates onto its own shoulders. Those
+    # probe almost identically (ratios differing in the 4th decimal) because
+    # refine_centre drags them back towards the same carrier -- but only
+    # partway, leaving ~1.3 kHz of residual offset. That is far too small to
+    # notice in a spectrum and far too large for the pilots: at 1.3 kHz the
+    # phase advances ~7.4 rad between pilots, the unwrap in prepare() breaks,
+    # and a capture that decodes 944/984 blocks decodes 0.
+    groups = []
+    for r in sorted(rows, key=lambda r: -r["power"]):
+        for g in groups:
+            if abs(r["refined"] - g[0]["refined"]) < dedupe_hz:
+                g.append(r)
+                break
+        else:
+            groups.append([r])
+    uniq = [g[0] for g in groups]          # strongest of each group
+    for r in rows:
+        r["duplicate"] = r not in uniq
+
+    good = [r for r in uniq if r["ok"]]
+    best = max(good, key=lambda r: r["ratio"])["centre"] if good else None
+    return best, rows
+
+
+def channelise(path, secs=None, up=2, sps=4, centre=None, autopick=True):
     """Raw WAV -> matched-filtered stream at `sps`, plus clock estimate.
 
     Returns (y, fs, rs_est, tau0, info). Symbol extraction is deliberately
@@ -55,9 +170,16 @@ def channelise(path, secs=None, up=2, sps=4):
         x = resample_poly(x, up, 1)
         sr = sr*up
 
-    y, fs, centre = recv.channelize(x, sr, sps=sps)
+    carriers = None
+    if centre is None and autopick:
+        centre, carriers = pick_carrier(x, sr, sps)
+        if centre is None:
+            raise NoCarrier(carriers)
+
+    y, fs, centre = recv.channelize(x, sr, sps=sps, centre=centre)
     rs_est, tau0 = recv.estimate_symbol_clock(y, fs)
     info = dict(raw_sr=raw_sr, raw_n=raw_n, secs=raw_n/raw_sr, sr=sr,
+                carriers=carriers,
                 centre=centre, rs=rs_est,
                 ppm=(rs_est - spec.F80T45X8B.rs)/spec.F80T45X8B.rs*1e6,
                 nframes=int(len(y)/(fs/rs_est))//MOS)
@@ -304,11 +426,23 @@ def survey(path, secs=None, ntau=TAU_STEPS, progress=None):
                          offset=int(rel[b]), tau=int(tau_idx[b]),
                          level=lvls[b], metric=float(np.median(mets[b:e]))))
     strong = float(np.percentile(mets, 90)) if len(mets) else 0.0
-    good = float(np.mean(mets > 0.75*strong)) if len(mets) else 0.0
+    # Calibrate against what a WRONG offset scores in this same capture.
+    # Using a fraction of the file's own p90 was wrong: on a capture with
+    # no usable carrier every frame scores ~20, so 100% of frames came out
+    # "strong" and the forecast said 97% for a file that decodes nothing.
+    d2 = np.empty_like(s)
+    d2[0] = 0
+    d2[1:] = s[1:]*np.conj(s[:-1])
+    pats2 = {lv: diff_uw(lv) for lv in spec.LEVELS_F80T45X8B}
+    fl = [ _corr(d2, 1 + f*MOS + MOS//3, MOS//8, pats2)
+           for f in range(min(20, len(offs))) ]
+    floor = float(np.median([g[0] for g in fl if g])) if any(fl) else 1.0
+    good = float(np.mean(mets > 1.8*floor)) if len(mets) else 0.0
     info.update(uw_levels=dict(Counter(x for x in lvls if x)),
                 tau_hist=np.bincount(tau_idx, minlength=ntau).tolist(),
                 runs=runs, metric_med=float(np.median(mets)),
-                metric_p90=strong, frac_strong=good,
+                metric_p90=strong, metric_floor=floor,
+                frac_strong=good,
                 est_yield=good*0.97)
     return info, (tau_idx, offs, lvls, mets)
 
@@ -518,6 +652,32 @@ def decode_block_anylevel(blk, thr=0.90, levels=None):
     return hits[0] if len(hits) == 1 else (None, None, 0.0)
 
 
+def report_no_carrier(path, rows, secs=None):
+    """Explain what was found instead, rather than just failing."""
+    print("  No F80T4.5X-8B carrier found. Candidates probed:")
+    for r in rows:
+        why = []
+        if r["ratio"] < 1.8:
+            why.append(f"UW correlation {r['ratio']:.2f}x the noise floor")
+        if abs(r["ppm"]) > 50:
+            why.append(f"symbol clock {r['ppm']:+.0f} ppm off nominal")
+        print(f"    {r['centre']/1e3:+9.1f} kHz  " +
+              ("; ".join(why) if why else "accepted"))
+    try:
+        from scan_bearers import detect_carriers, identify
+        x, sr = recv.load_wav_iq(path, secs=min(secs or 20, 20))
+        x = x - x.mean()
+        print(NL_ + "  What this capture actually contains:")
+        for c in detect_carriers(x, sr):
+            best, _, m4 = identify(x, sr, c)
+            if best:
+                print(f"    {c['centre']/1e3:+9.1f} kHz  bw {c['bw']/1e3:5.1f} kHz  "
+                      f"-> {best[0]/1e3:.1f} kBd  {best[1]}")
+        print(NL_ + "  This decoder handles F80T4.5X-8B (151.2 kBd) only.")
+    except Exception as exc:
+        print(f"  (bearer scan unavailable: {exc})")
+
+
 # --- driver ------------------------------------------------------------------
 
 def main():
@@ -546,8 +706,13 @@ def main():
     if a.survey:
         import time
         t0 = time.time()
-        info, (tau_idx, offs, lvls, mets) = survey(a.path, secs=a.secs,
-                                                   ntau=a.ntau, progress=prog)
+        try:
+            info, (tau_idx, offs, lvls, mets) = survey(
+                a.path, secs=a.secs, ntau=a.ntau, progress=prog)
+        except NoCarrier as exc:
+            print()
+            report_no_carrier(a.path, exc.rows, a.secs)
+            return 2
         el = time.time() - t0
         print()
         print(f"{Path(a.path).name}: {info['secs']:.1f} s @ "
@@ -578,9 +743,14 @@ def main():
             print(f"    ... {len(info['runs'])-30} more")
         return 0
 
-    recs, info, (tau_idx, offs, lvls, mets) = decode_capture(
-        a.path, secs=a.secs, thr=a.thr, level=a.level,
-        search_levels=a.search_levels, ntau=a.ntau, progress=prog)
+    try:
+        recs, info, (tau_idx, offs, lvls, mets) = decode_capture(
+            a.path, secs=a.secs, thr=a.thr, level=a.level,
+            search_levels=a.search_levels, ntau=a.ntau, progress=prog)
+    except NoCarrier as exc:
+        print()
+        report_no_carrier(a.path, exc.rows, a.secs)
+        return 2
     print()
     print(f"{Path(a.path).name}: {info['secs']:.1f} s @ {info['raw_sr']/1e3:.0f} kHz")
     print(f"  centre {info['centre']:+.1f} Hz   rs {info['rs']:.3f} Bd "

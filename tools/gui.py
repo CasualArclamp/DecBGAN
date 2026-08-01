@@ -34,7 +34,7 @@ from matplotlib.backends.backend_tkagg import (                # noqa: E402
 from scipy.signal import welch                                # noqa: E402
 
 from bgan import spec, mod, recv, bulletin, pcapout           # noqa: E402
-from tools.decode_wav import (decode_capture, survey,          # noqa: E402
+from tools.decode_wav import (decode_capture, survey, NoCarrier,  # noqa: E402
                               channelise, safe_stem, MOS)
 
 NL = chr(10)
@@ -104,6 +104,9 @@ class Worker(threading.Thread):
                 progress=prog)
         except KeyboardInterrupt:
             self.emit("status", text="stopped", pct=0)
+            return
+        except NoCarrier as exc:
+            self.emit("nocarrier", rows=exc.rows, path=self.path)
             return
         r.info = dict(info)
         r.info["path"] = self.path
@@ -356,6 +359,9 @@ class App(tk.Tk):
         self.update_idletasks()
         try:
             info, (tau_idx, offs, lvls, mets) = survey(p, secs=secs)
+        except NoCarrier as exc:
+            self._no_carrier(exc.rows, p)
+            return
         except Exception as exc:
             self._log(f"scan failed: {exc}")
             self.statvar.set("scan failed - see Log")
@@ -400,6 +406,50 @@ class App(tk.Tk):
         self._show_info({**info, "path": p,
                          "file_hz": _freq_from_name(p),
                          "occ_bw": float("nan")}, extra)
+
+    def _no_carrier(self, rows, path):
+        """Explain a capture with no F80T4.5X-8B carrier, rather than failing.
+
+        A capture holding only 33.6 kBd bearers used to decode to noise and
+        still report a high yield forecast. Saying what is actually present is
+        more useful than an error.
+        """
+        self.pbar["value"] = 0
+        self.statvar.set("no F80T4.5X-8B carrier in this capture")
+        lines = ["", "--- no usable carrier ---", "  candidates probed:"]
+        for r in rows:
+            why = []
+            if r["ratio"] < 1.8:
+                why.append(f"UW correlation only {r['ratio']:.2f}x noise")
+            if abs(r["ppm"]) > 50:
+                why.append(f"clock {r['ppm']:+.0f} ppm off")
+            lines.append(f"    {r['centre']/1e3:+9.1f} kHz  "
+                         + ("; ".join(why) if why else "accepted"))
+        found = []
+        try:
+            from tools.scan_bearers import detect_carriers, identify
+            x, sr = recv.load_wav_iq(path, secs=20)
+            x = x - x.mean()
+            for c in detect_carriers(x, sr):
+                best, _, _m4 = identify(x, sr, c)
+                if best:
+                    found.append(f"    {c['centre']/1e3:+9.1f} kHz  "
+                                 f"bw {c['bw']/1e3:5.1f} kHz  -> "
+                                 f"{best[0]/1e3:.1f} kBd  {best[1]}")
+        except Exception as exc:
+            found.append(f"    (bearer scan failed: {exc})")
+        if found:
+            lines += ["", "  what this capture actually contains:"] + found
+        lines += ["", "  This decoder handles F80T4.5X-8B (151.2 kBd) only.", ""]
+        self.tab_log.insert("end", NL.join(lines) + NL)
+        self.tab_log.see("end")
+        self._show_info(
+            {"path": path, "file_hz": _freq_from_name(path), "secs": 0.0,
+             "raw_sr": 0, "centre": 0.0, "occ_bw": float("nan"), "rs": 0.0,
+             "ppm": 0.0, "nframes": 0, "m4": float("nan"),
+             "esn0": float("nan")},
+            NL + NL + "NO USABLE CARRIER" + NL
+            + NL.join(x.strip() and "  " + x.strip() or "" for x in found))
 
     def _probe_path(self):
         """Read the WAV header so the length is known before decoding.
@@ -485,6 +535,8 @@ class App(tk.Tk):
             self._log(f"framing: {kw['nplateau']} plateau(s) over "
                       f"{kw['nframes']} frames, offset span {kw['span']} "
                       f"symbols")
+        elif kind == "nocarrier":
+            self._no_carrier(kw["rows"], kw["path"])
         elif kind == "error":
             self._log(kw["text"])
             self.statvar.set("error - see Log tab")
