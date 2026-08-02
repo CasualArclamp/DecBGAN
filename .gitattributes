@@ -3,3 +3,6 @@
 *.bat text eol=crlf
 # shell scripts must be LF or the shebang breaks
 *.sh text eol=lf
+# markdown and text: normalise to LF so line-based patching is predictable
+*.md text eol=lf
+*.txt text eol=lf

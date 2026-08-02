@@ -479,5 +479,6 @@ wherever byte 3 was not a code-rate tag gave 56% level accuracy, against
 frames confirmed by the frame-no check, where it scores 219/0.
 
 So the BCtPDU header is understood and the first SDU is located, but SDU
-chaining beyond the first is not. Full SDU demux still needs the missing
-parts 3-2..3-8.
+chaining beyond the first is not. The rule for it is in TS 102 744-3-3/-3-4
+(Bearer Connection Layer), which turned out to be freely available from
+ETSI after all -- see docs/OPEN_QUESTIONS.md item 6.
