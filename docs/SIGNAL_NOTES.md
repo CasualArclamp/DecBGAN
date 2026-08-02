@@ -735,3 +735,33 @@ EVM 0.270 and 0.320 against 0.219 for the capture that decodes. So the symbols
 really are worse, but not for any reason yet identified. Next thing to try is
 the timing phase resolution (ntau) and the matched-filter roll-off, since both
 affect EVM without touching PSD SNR.
+
+## Segmented decoding — tried, measured, left off by default (Aug 2026)
+
+The carrier wanders within a capture. One 60 s file fits **+198.9 Hz** globally
+but **-152.1 Hz** over the eight seconds at t=15 s. That file decodes 0 of 6048
+blocks whole, while the same eight seconds decode 40 of 48 standalone. So a
+single carrier and clock fit for a whole capture is demonstrably wrong.
+
+Acting on it did not pay. Measured on a control capture that decodes 96.8%
+whole:
+
+    per-segment carrier selection    47.7%    3 of 7 segments -> NoCarrier
+    global carrier, local refine     80.5%
+    no segmentation                  96.8%
+
+Re-picking the carrier in each 10 s segment is plainly wrong: `pick_carrier`
+needs more data than that and rejects good carriers. Even refining a
+globally-picked centre per segment costs ~16%, most likely because
+`estimate_symbol_clock` over 10 s is less precise than over 60 s and per-frame
+timing cannot fully absorb the difference.
+
+Kept as `--segment N`, off by default. Worth revisiting with a longer segment,
+or by estimating the clock globally while refining only the carrier locally --
+the underlying observation stands even though this implementation of it does
+not.
+
+Also note `1543.100_17-46-31` is still 0 either way, so carrier wander is not
+the explanation for that one. Its first ten seconds carry no decodable data at
+any of the top five UW peaks across all eight timing phases (best agreement
+0.54), and the whole-file decode finds nothing anywhere.

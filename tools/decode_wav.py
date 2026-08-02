@@ -154,14 +154,15 @@ def pick_carrier(x, sr, sps=4, ncand=4, min_ratio=1.8, max_ppm=50.0,
     return best, rows
 
 
-def channelise(path, secs=None, up=2, sps=4, centre=None, autopick=True):
+def channelise(path, secs=None, up=2, sps=4, centre=None, autopick=True,
+               offset=0.0):
     """Raw WAV -> matched-filtered stream at `sps`, plus clock estimate.
 
     Returns (y, fs, rs_est, tau0, info). Symbol extraction is deliberately
     NOT done here -- see symbols_at / survey_taus for why the timing phase
     cannot be fixed once for the whole capture.
     """
-    x, sr = recv.load_wav_iq(path, secs=secs)
+    x, sr = recv.load_wav_iq(path, secs=secs, offset=offset)
     x = x - x.mean()
     raw_sr, raw_n = sr, len(x)
 
@@ -388,7 +389,7 @@ def survey_taus(y, fs, rs_est, tau0, ntau=TAU_STEPS, win=320, levels=None):
     return best
 
 
-def survey(path, secs=None, ntau=TAU_STEPS, progress=None):
+def survey(path, secs=None, ntau=TAU_STEPS, progress=None, offset=0.0):
     """Fast scan: what is on this carrier and where, without decoding.
 
     Runs the front end and the timing/framing search but no turbo decoding,
@@ -410,7 +411,7 @@ def survey(path, secs=None, ntau=TAU_STEPS, progress=None):
 
     Returns a dict.
     """
-    y, fs, rs_est, tau0, info = channelise(path, secs)
+    y, fs, rs_est, tau0, info = channelise(path, secs, offset=offset)
     if progress:
         progress(0.5, "scanning framing and timing")
     tau_idx, offs, lvls, mets = survey_taus(y, fs, rs_est, tau0, ntau)
@@ -448,12 +449,13 @@ def survey(path, secs=None, ntau=TAU_STEPS, progress=None):
 
 
 def decode_capture(path, secs=None, thr=0.90, level=None, search_levels=True,
-                   ntau=TAU_STEPS, progress=None):
+                   ntau=TAU_STEPS, progress=None, offset=0.0, centre=None):
     """Full chain with per-frame timing recovery. Returns (records, info).
 
     records: list of (frame, block, level, agreement, payload_bits)
     """
-    y, fs, rs_est, tau0, info = channelise(path, secs)
+    y, fs, rs_est, tau0, info = channelise(path, secs, offset=offset,
+                                           centre=centre)
     if progress:
         progress(0.10, "searching timing phases")
     tau_idx, offs, lvls, mets = survey_taus(y, fs, rs_est, tau0, ntau)
@@ -626,6 +628,126 @@ def decode_block_fast(blk, b, pred, thr=0.90, hint=None):
     return None, None, 0.0
 
 
+
+SEGMENT_SECS = 10.0
+
+
+def decode_segmented(path, secs=None, segment=SEGMENT_SECS, progress=None,
+                     **kw):
+    """Decode a capture in segments, re-estimating clock and framing in each.
+
+    EXPERIMENTAL, and off by default because it currently loses more than it
+    recovers. Use --segment N to enable.
+
+    The motivating measurement is real: the carrier wanders within a capture.
+    One 60 s file fits +198.9 Hz globally but -152.1 Hz over the eight
+    seconds at t=15 s, and while that file decodes 0 of 6048 blocks whole, the
+    same eight seconds decode 40 of 48 standalone.
+
+    Segmenting has not cashed that in. Measured on a capture that decodes
+    96.8% whole:
+
+        per-segment carrier selection   47.7%   (3 of 7 segments NoCarrier)
+        global carrier, local refine    80.5%
+        no segmentation                 96.8%
+
+    Re-picking the carrier per segment is clearly wrong -- pick_carrier's
+    thresholds need more than 10 s. Even refining a globally-picked centre
+    costs ~16%, most likely because estimate_symbol_clock over 10 s is less
+    precise than over 60 s and per-frame timing cannot fully absorb that.
+    A longer segment, or estimating the clock globally while refining only
+    the carrier per segment, is the obvious next thing to try.
+
+
+    A single carrier/clock fit for a whole capture is wrong on real
+    recordings. The carrier wanders: one 60 s file reads +198.9 Hz globally but
+    -152.1 Hz over the eight seconds starting at t=15 s. Decoded whole, that
+    file yields 0 of 6048 blocks; decoded from t=15 s alone, the same eight
+    seconds yield 40 of 48.
+
+    Segmenting also contains damage. A capture whose opening seconds are
+    unusable no longer poisons the rest, and dropouts only disturb the segment
+    they fall in rather than the global clock fit.
+
+    Frame indices are made continuous across segments so downstream users --
+    the BulletinBoard frame-no check in particular -- still see one timeline.
+
+    Returns (records, info, diagnostics) like decode_capture.
+    """
+    # Pick the carrier ONCE over the whole capture, then hand that centre to
+    # every segment and let refine_centre tune it locally. Re-running full
+    # candidate selection per segment was a net loss: pick_carrier's
+    # thresholds need more than 10 s of data, three of seven segments came
+    # back NoCarrier, and a capture that decoded 96.8% whole fell to 47.7%.
+    probe = None
+    try:
+        import wave
+        with wave.open(path) as w:
+            probe = w.getnframes()/w.getframerate()
+    except Exception:
+        pass
+    total = min(secs, probe) if (secs and probe) else (secs or probe)
+    if not total:
+        return decode_capture(path, secs=secs, progress=progress, **kw)
+
+    base_centre, rows = None, []
+    try:
+        x0, sr0 = recv.load_wav_iq(path, secs=min(total, 20.0))
+        x0 = x0 - x0.mean()
+        if spec.F80T45X8B.rs >= sr0/2:
+            x0 = resample_poly(x0, 2, 1)
+            sr0 = sr0*2
+        base_centre, rows = pick_carrier(x0, sr0)
+        del x0
+    except Exception:
+        pass
+    if base_centre is None:
+        raise NoCarrier(rows)
+
+    nseg = max(1, int(np.ceil(total/segment)))
+    allrecs, infos = [], []
+    tau_all, off_all, lvl_all, met_all = [], [], [], []
+    frames_done = 0
+    for k in range(nseg):
+        t0 = k*segment
+        dur = min(segment, total - t0)
+        if dur < 2.0:
+            break
+
+        def sub(frac, text, const=None, _k=k):
+            if progress:
+                progress((_k + frac)/nseg,
+                         f"segment {_k+1}/{nseg}: {text}", const)
+        try:
+            recs, info, diag = decode_capture(
+                path, secs=dur, offset=t0, progress=sub,
+                centre=base_centre, **kw)
+        except NoCarrier:
+            frames_done += int(dur/0.080)
+            continue
+        ti, offs, lvls, mets = diag
+        allrecs += [(f + frames_done, b, lv, ag, bits)
+                    for f, b, lv, ag, bits in recs]
+        tau_all.append(ti)
+        off_all.append(offs + frames_done*MOS)
+        lvl_all += list(lvls)
+        met_all.append(mets)
+        frames_done += len(offs)
+        infos.append(info)
+
+    if not infos:
+        raise NoCarrier([])
+    info = dict(infos[0])
+    info["nframes"] = frames_done
+    info["segments"] = len(infos)
+    info["secs"] = total
+    info["centre_spread"] = (max(i["centre"] for i in infos)
+                             - min(i["centre"] for i in infos))
+    return (allrecs, info,
+            (np.concatenate(tau_all), np.concatenate(off_all), lvl_all,
+             np.concatenate(met_all)))
+
+
 def decode_block_anylevel(blk, thr=0.90, levels=None):
     """Identify the coding level by trial decode. Returns (bits, level, ag).
 
@@ -686,6 +808,11 @@ def main():
     ap.add_argument("--secs", type=float, default=None)
     ap.add_argument("--thr", type=float, default=0.90)
     ap.add_argument("--level", default=None, help="force coding level")
+    ap.add_argument("--segment", type=float, default=0.0,
+                    help="EXPERIMENTAL: decode in N-second segments, "
+                         "re-estimating clock and framing in each. Off by "
+                         "default; currently costs ~16%% of blocks on a "
+                         "capture that decodes well whole.")
     ap.add_argument("--survey", action="store_true",
                     help="fast scan only: unique words, framing, timing and a "
                          "yield forecast, with no turbo decoding")
@@ -743,10 +870,13 @@ def main():
             print(f"    ... {len(info['runs'])-30} more")
         return 0
 
+    runner = decode_segmented if a.segment > 0 else decode_capture
+    extra = {"segment": a.segment} if a.segment > 0 else {}
     try:
-        recs, info, (tau_idx, offs, lvls, mets) = decode_capture(
+        recs, info, (tau_idx, offs, lvls, mets) = runner(
             a.path, secs=a.secs, thr=a.thr, level=a.level,
-            search_levels=a.search_levels, ntau=a.ntau, progress=prog)
+            search_levels=a.search_levels, ntau=a.ntau, progress=prog,
+            **extra)
     except NoCarrier as exc:
         print()
         report_no_carrier(a.path, exc.rows, a.secs)

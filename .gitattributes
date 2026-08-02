@@ -6,3 +6,5 @@
 # markdown and text: normalise to LF so line-based patching is predictable
 *.md text eol=lf
 *.txt text eol=lf
+# python: LF, so line-based patching is predictable
+*.py text eol=lf
