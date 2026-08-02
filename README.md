@@ -36,8 +36,10 @@ Being precise about this, because the gap is real:
   interference-hit captures still do worse.
 - **No protocol demux.** Payload is decoded FEC blocks concatenated, with
   silent gaps where blocks failed. IP packets are *carved* by scanning for
-  valid IPv4 headers, not reassembled. Doing it properly needs
-  TS 102 744-3-2 … 3-8 (logical channels, RLC/MAC), which are not public.
+  valid IPv4 headers, not reassembled. The layers that specify how to do it
+  properly (TS 102 744-3-3/-3-4 Bearer Connection, -3-5/-3-6 Adaptation)
+  are freely available from ETSI; wiring them up is the next substantial
+  job.
 - **Forward link only.** Nothing on the return direction.
 - **One bearer type.** F80T4.5X-8B. Others are defined in `bgan/spec.py` but
   untested.
@@ -178,6 +180,7 @@ agree/disagree. A decoder manufacturing blocks would not do that.
 
 ```
 bgan/
+  __init__.py   package docstring and submodule map
   spec.py       bearer definitions, unique words, constants
   annex.py      Annex C.1/C.2 table loaders
   turbo.py      SRCC encoder, termination
@@ -219,5 +222,7 @@ standard with no public open-source receiver.
 
 ## Licence
 
-MIT — see [`LICENSE`](LICENSE). ETSI specifications are separately copyright
-ETSI and are not covered by it.
+MIT — see [`LICENSE`](LICENSE).
+
+ETSI specifications are separately copyright ETSI, are not covered by that
+licence, and are not distributed here. See [`NOTICE`](NOTICE).

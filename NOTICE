@@ -1,0 +1,23 @@
+Third-party material
+====================
+
+ETSI specifications
+-------------------
+
+This software implements ETSI TS 102 744 (Satellite Earth Stations and
+Systems; Family SL Satellite Radio Interface, Release 1).
+
+Those specifications, including the Annex C.1 and C.2 data tables that the
+decoder requires at runtime, are copyright ETSI. They are NOT covered by the
+MIT licence in LICENSE and are NOT distributed with this software.
+
+They are free to download from <https://www.etsi.org/standards>. See README.md
+for which archives are needed and where to extract them.
+
+The MIT licence applies to the code in this repository only.
+
+Recovered traffic
+-----------------
+
+No decoded traffic is included in this repository, and none should be added.
+Payloads recovered by this decoder are other people's communications.

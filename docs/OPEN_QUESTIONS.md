@@ -89,27 +89,46 @@ Validated by prediction: the parsed AVP gives the coding level of every FEC
 block in the frame, and matches the independent trial-decode search on
 **103 blocks with 0 disagreements**. See docs/VALIDATION.md.
 
-Still searched in practice, though: the BulletinBoard is only broadcast every
-17th frame, so 16 frames in 17 have no BulletinBoard to read levels from.
-Reading them there needs the generic BCtPDU/avp-list structure, not just the
-BulletinBoard SDU.
+Since resolved further: the same AVP is the first BCtSDU at bit 24 of block
+0 on frames that carry no BulletinBoard, so levels are now *read* on 88% of
+frames (99.35% agreement against trial decode) and searched only on the
+rest. See docs/VALIDATION.md.
 
-## OPEN
-
-### 6. Missing specification parts
+### 6. Missing specification parts — RESOLVED, all obtained
 We now hold 2-1 (physical layer), **3-1 (bearer control)** and 3-9 (user plane).
 3-1 supplies the BCt-PDU/SDU structures, the BulletinBoard SDU, the AVP
-catalogue and the CodeRate table. Still missing for full packet recovery:
-- **3-2** Bearer Control Operation
-- **3-3..3-8** logical channels, RLC/MAC, SNDCP-equivalent
+catalogue and the CodeRate table.
+
+**No longer missing.** Parts 3-2 through 3-8 were assumed unobtainable for
+most of this project and repeatedly described that way. They are free from
+ETSI and were one HTTP request away; the only obstacle was that etsi.org
+403s a default curl user-agent, which read as 'not found'. Part 3 is now
+complete, sub-parts 1-9:
+
+    3-2  Bearer Control Layer Operation        98 pp
+    3-3  Bearer Connection Layer Interface     17 pp
+    3-4  Bearer Connection Layer Operation     43 pp
+    3-5  Adaptation Layer Interface            72 pp
+    3-6  Adaptation Layer Operation           148 pp
+    3-7  NAS Layer Interface Extensions        41 pp
+    3-8  NAS Layer and User Plane Operation    30 pp
+
+3-3 and 3-4 are the Bearer Connection layer, which is what sits between a
+decoded FEC block and a reassembled packet -- i.e. the SDU chaining that
+defeated the length-field walk. 3-5/3-6 are the Adaptation Layer, where
+segmentation and reassembly toward IP should live.
 
 3-1 does **not** address the physical-layer framing blocker below; it
 reconfirms that the unique word implicitly signals block 0's coding level,
 i.e. the UW is expected to be present.
 
-Without these, the fallback is scanning decoded bytes for plausible IPv4
-headers, as the previous project did. That works but loses damaged headers and
-invents packets from noise. Any such packet must be labelled unvalidated.
+Byte-scanning for plausible IPv4 headers remains the fallback until the
+Bearer Connection and Adaptation layers are implemented. It works (230
+checksum-valid packets from one capture, 0 false accepts per 2 MB of random
+bytes) but loses packets that span a failed block, so anything it produces
+is evidence rather than a faithful record.
+
+## OPEN
 
 ### 7. Where the demodulator's implementation loss goes
 Measured on BGAN1: PSD says Es/N0 14.1 dB, a matched filter with timing
@@ -119,3 +138,25 @@ and is the target for the receive chain.
 The M4/M2^2 estimator used for that figure is calibrated against the loopback
 transmitter and is accurate to +/-0.25 dB over 8..20 dB, so the gap is real
 rather than an artifact of the estimator.
+
+### 9. Three captures that frame cleanly but decode nothing
+`1553.500` and `1550.398` produce a strong unique-word correlation (metric
+57-61), correct 12096-symbol frame spacing and a proper 16-QAM constellation,
+yet no block decodes at any offset or coding level.
+
+Ruled out by measurement, not assumption: carrier offset (residual CFO within
+the 552 Hz pilot-unwrap limit), clipping (peaks at 5-8% of full scale), weak
+signal, adjacent carriers, wrong bearer type, matched-filter roll-off (EVM flat
+across beta 0.18-0.35), phase noise (pilot fit residual comparable to captures
+that work), and a data/UW offset (+/-300 symbol sweep, best agreement 0.569).
+
+**A related case was solved and is a warning about method.** `1543.100` looked
+identical to these and survived the same nine tests -- then decoded 40/48
+blocks when read from t=15 s instead of t=0 s. Every diagnostic had been run on
+the first ten seconds of the file, which happened to be unusable. The
+measurements were sound; the sample was not.
+
+So before dissecting a capture that will not decode, vary the time window. It
+is the cheapest test available and it invalidates everything downstream of it.
+Whether the two remaining files have any good segment at all is still open:
+t=0/15/30/45 s were tried and all failed.
