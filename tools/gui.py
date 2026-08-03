@@ -306,6 +306,7 @@ class App(tk.Tk):
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.tab_int = self._textpage(nb, "Interesting")
+        self.tab_files = self._textpage(nb, "Files")
         self.tab_str = self._textpage(nb, "Strings")
         self.tab_bb = self._textpage(nb, "Bearer control")
         self.tab_pkt = self._textpage(nb, "Packets")
@@ -319,6 +320,8 @@ class App(tk.Tk):
                    command=self._exp_ipv4).pack(side="left", padx=6)
         ttk.Button(bot, text="Export payload .bin",
                    command=self._exp_bin).pack(side="left")
+        ttk.Button(bot, text="Save found files",
+                   command=self._exp_files).pack(side="left", padx=6)
         self.expvar = tk.StringVar(value="")
         ttk.Label(bot, textvariable=self.expvar).pack(side="left", padx=10)
 
@@ -498,8 +501,8 @@ class App(tk.Tk):
                       f"{self.probe['secs']:.1f} s - using the whole file")
             secs = self.probe["secs"]
             self.secsvar.set(f"{secs:.1f}")
-        for t in (self.tab_int, self.tab_str, self.tab_bb, self.tab_pkt,
-                  self.tab_log):
+        for t in (self.tab_int, self.tab_files, self.tab_str, self.tab_bb,
+                  self.tab_pkt, self.tab_log):
             t.delete("1.0", "end")
         self.stop.clear()
         self.result = None
@@ -665,10 +668,82 @@ class App(tk.Tk):
         self._show_info(r.info, "\n" + "\n".join(x for x in extra if x != ""))
 
         self._fill_interesting(r)
+        self._fill_files(r)
         self._fill_strings(r)
         self._fill_bb(r)
         self._fill_pkts(r)
         self._log(f"done: {n} blocks, {len(r.payload)} bytes payload")
+
+    def _fill_files(self, r):
+        """Whole files reconstructed from HTTP bodies, with a preview.
+
+        Each is shown with whether it looks intact. That flag is not
+        decoration: there is no Bearer Connection reassembly, so the bytes
+        after a header may belong to a different flow, and the only available
+        check is whether the body is self-consistent with its own declared
+        type. Anything marked TRUNCATED should be read as a fragment.
+        """
+        t = self.tab_files
+        docs = findings.documents(r.payload)
+        r.documents = docs
+        if not docs:
+            t.insert("end", "No complete files found." + NL*2
+                     + "A body needs a Content-Length or chunk framing to be "
+                       "bounded at all, and needs to survive without a failed "
+                       "block in the middle. Short or lossy decodes yield "
+                       "none." + NL)
+            return
+        from collections import Counter
+        tally = Counter(d.check for d in docs)
+        t.insert("end", f"{len(docs)} file(s), "
+                        + ", ".join(f"{v} {k}" for k, v in tally.most_common())
+                        + f", {sum(len(d.data) for d in docs)} bytes total{NL}")
+        t.insert("end", "Carved from HTTP bodies, not reassembled. "
+                        '"Save found files" writes them to a folder.' + NL)
+        t.insert("end", "intact = the body is self-consistent with its own "
+                        "type; unverified = that type carries no check." + NL*2)
+        for d in docs:
+            t.insert("end", f"{d.name}   {d.ctype}   {len(d.data)} B   "
+                            f"[{d.check}]{NL}")
+            t.insert("end", f"   @{d.offset}  {d.status}"
+                            + (f"   {d.note}" if d.note else "") + NL)
+            body = d.data[:400]
+            # decide text against hex by what the bytes actually are, not by
+            # what the header claimed: a mislabelled or interrupted body
+            # renders as mojibake otherwise
+            printable = sum(1 for c in body
+                            if 0x09 <= c <= 0x7e or c in (0x0a, 0x0d))
+            if body and printable/len(body) > 0.9:
+                for line in body.decode("utf-8", "replace").splitlines()[:8]:
+                    t.insert("end", f"      {line[:140]}{NL}")
+            else:
+                for k in range(0, min(len(body), 96), 32):
+                    t.insert("end", f"      {body[k:k+32].hex(' ')}{NL}")
+            t.insert("end", NL)
+
+    def _exp_files(self):
+        r = self._need()
+        if not r:
+            return
+        docs = getattr(r, "documents", None)
+        if docs is None:
+            docs = findings.documents(r.payload)
+        if not docs:
+            messagebox.showinfo("Nothing to save",
+                                "No complete files were reconstructed.")
+            return
+        d = filedialog.askdirectory(title="Folder for the reconstructed files")
+        if not d:
+            return
+        stem = safe_stem(r.info.get("path"))
+        out = Path(d)/f"{stem}_files"
+        out.mkdir(parents=True, exist_ok=True)
+        for doc in docs:
+            # truncated bodies are still worth keeping, but say so in the name
+            nm = (doc.name if doc.check != "truncated"
+                  else doc.name.replace(".", ".partial.", 1))
+            (out/nm).write_bytes(doc.data)
+        self.expvar.set(f"wrote {len(docs)} file(s) -> {out.name}")
 
     def _fill_interesting(self, r):
         """Recognisable artefacts: certificates, DNS, HTTP, TLS, URLs.
