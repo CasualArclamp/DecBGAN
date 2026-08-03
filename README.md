@@ -141,9 +141,10 @@ It reports which unique words are present and where, how the framing and
 timing move, and a conservative yield forecast, so a long capture can be
 triaged before you commit to it.
 
-Decode cost on the development machine is about **1.5 s of compute per second
-of capture**, so a 60 s capture is about 90 seconds. Coding levels are read
-from the BCtPDU layer on ~88% of frames and only searched on the rest.
+Decode cost on the development machine is about **1.0 s of compute per second
+of capture** across 16 cores, so a 60 s capture takes roughly a minute — about
+the time it took to record. Single-threaded it is 1.76 s/s. Coding levels are
+read from the BCtPDU layer on ~88% of frames and only searched on the rest.
 The estimate shown updates when you toggle level search.
 
 ### Command line
@@ -151,6 +152,7 @@ The estimate shown updates when you toggle level search.
 ```bash
 python tools/decode_wav.py capture.wav --survey     # fast scan, no decoding
 python tools/decode_wav.py capture.wav              # -> work/<capture>_payload.bin
+python tools/decode_wav.py capture.wav --jobs 4     # cap the worker threads
 python tools/parse_bulletin.py work/payload.npz     # bearer control
 python tools/scan_bearers.py capture.wav            # what carriers are present
 python tests/waterfall.py                           # codec vs Annex B2

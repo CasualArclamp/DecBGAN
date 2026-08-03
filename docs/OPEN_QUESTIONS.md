@@ -180,3 +180,56 @@ So before dissecting a capture that will not decode, vary the time window. It
 is the cheapest test available and it invalidates everything downstream of it.
 Whether the two remaining files have any good segment at all is still open:
 t=0/15/30/45 s were tried and all failed.
+
+### 10. An inserted framing header, found but not solved — OPEN
+
+Reconstructing documents turned up a structure that interrupts the byte
+stream. It is almost certainly the Bearer Connection or Adaptation Layer PDU
+header, i.e. the thing item 6 says is needed for real reassembly, and it is
+recorded here as a lead rather than a result.
+
+**The evidence it exists.** DER text in a recovered CRL reads `Sco` + 7 bytes
++ `ttsdale`. Three separate known strings show the same 7-byte interruption.
+Better, the same GoDaddy CRL is fetched three or four times per capture, so
+diffing identical documents against each other exposes the insertions exactly:
+43 of them, in two families of 7 and 8 bytes.
+
+A gzip stream makes it measurable, since it fails at the first wrong byte:
+
+    as-is                       51 bytes of XML out
+    strip 7 bytes at -2        861 bytes of XML out
+
+and the output is coherent -- a Symantec Endpoint Protection GroupIndex
+manifest whose `LastModifiedTime = "30/07/2026 15:13:34"` sits two hours
+before the capture was recorded.
+
+**What is known about it.** Across the 43 recovered headers there is a 14-bit
+invariant `01100000111110` (0x183E when byte-aligned) at bit offset 18 in
+every one, in both the 7- and 8-byte families. Two families of different byte
+length with one bit-invariant means the header is **bit-aligned, not
+byte-aligned**. Searching 1543.100a bitwise finds 3155 hits against 952
+expected by chance, 2664 of them at bit offset 2 mod 8, and the dominant
+spacing is 2080 bits -- exactly 260 bytes -- 492 times.
+
+**Why it is not solved.** The marker does not generalise:
+
+    capture      bit-hits   chance   ratio
+    1543.100a       3155      952     3.3x
+    1543.100b        676      577     1.2x
+    BGAN15           103      240     0.4x
+
+At chance level on two of three captures, so `01100000111110` is not a sync
+word. It is far more likely the stable upper bits of a counter or a
+session/flow identifier that happens to hold still across one capture. The
+byte-aligned form supports that: the field after it increments by 16 to 48
+per occurrence.
+
+Stripping in the bit domain does not beat stripping in the byte domain
+(851 bytes against 861), which says detection is the bottleneck rather than
+alignment. Chasing it further by reverse engineering has hit diminishing
+returns.
+
+**The way forward is the specification, not more guessing.** TS 102 744-3-5
+and -3-6 are the Adaptation Layer interface and operation, and are already in
+`docs/`. They should define this header outright. Read those before
+attempting more of this.

@@ -150,16 +150,18 @@ def _freq_from_name(path):
 
 
 # Wall-clock cost of a decode, in seconds of compute per second of capture,
-# with the 8-phase timing search on. Measured on this machine by timing 4 s
-# and 12 s decodes and fitting a line: 9.84 s/s with -0.6 s fixed, i.e. the
-# numba JIT warmup is negligible once its cache is warm.
+# with the 8-phase timing search on. Measured on this machine over a 30 s
+# capture: 1.76 s/s single-threaded, 0.97 s/s across 16 cores -- so a capture
+# now decodes in roughly the time it took to record.
 #
-# Without the 10-level trial decode it is 1.03 s/s -- a measured 0.11 ratio,
-# not the 10x the level count would suggest, because the timing survey and
-# framing are paid either way.
+# Without the 10-level trial decode it is a measured 0.11 ratio, not the 10x
+# the level count would suggest, because the timing survey and framing are
+# paid either way.
 #
-# A guide for choosing a length, not a promise; a slower machine will differ.
-EST_SEC_PER_SEC = 1.50
+# A guide for choosing a length, not a promise. It scales with core count, so
+# a machine with fewer cores will be slower -- decode_wav.resolve_jobs uses
+# one worker per core unless --jobs or $BGAN_JOBS says otherwise.
+EST_SEC_PER_SEC = 1.00
 EST_NOSEARCH_RATIO = 0.69
 
 
@@ -609,6 +611,8 @@ class App(tk.Tk):
         if np.isfinite(i.get("uw_evm", float("nan"))):
             txt.append(f"  UW EVM          {i['uw_evm']:.3f}   "
                        f"(~0.17 decodes, ~0.45 does not)")
+        if i.get("jobs"):
+            txt.append(f"  decode threads  {i['jobs']}")
         if i.get("cfo_applied"):
             txt.append(f"  carrier resid   {i['cfo_hz']:+.1f} Hz removed"
                        + ("  (past pilot-unwrap limit)"

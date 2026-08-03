@@ -810,3 +810,69 @@ the content analysis done independently:
 Payload size does not predict findings: `1543.100b` decodes half again as many
 bytes as `1543.100a` and finds a third fewer things, because more of its bytes
 are one bulk transfer rather than many small exchanges.
+
+---
+
+## Threading the decode (Aug 2026)
+
+Frames decode on a thread pool, one worker per core by default. Output is
+**bit-identical** to the sequential path at every thread count -- verified
+record for record, including the payload bits, on twelve captures.
+
+### The GIL had to go first
+
+Threads bought nothing at all before this. The numba kernels were compiled
+`@njit(cache=True)`, which holds the GIL for the duration of the call, so 16
+threads measured **0.98x** -- slower than one. With `nogil=True`, on the turbo
+decoder alone over 128 blocks:
+
+    threads      1      2      4      8     16
+    speedup   1.00   2.00   3.85   6.96  10.25
+
+Anything claiming a threading speedup without checking this is measuring
+something else.
+
+### Where the time really was
+
+Profiling first was worth more than the threading. On an 8 s decode:
+
+    pick_carrier          10.58 s    <- the actual hotspot
+    channelize             1.85 s
+    survey_taus            0.74 s
+    estimate_symbol_clock  0.61 s
+    resample x2            0.22 s
+    load_wav_iq            0.03 s
+    block decoding        ~11.4  s
+
+`probe_centre` looks at six frames -- 0.48 s of signal -- but channelised the
+entire capture to do it, so its cost grew with capture length for no benefit.
+Probing a 4 s window instead reaches the **same accept/reject decision on all
+six captures tested** and runs 3.0-3.5x faster. The centre it returns is only
+a starting point; `recv.channelize` re-refines against the full capture, so a
+slightly different peak here does not propagate.
+
+### Result
+
+    30 s capture, single-threaded   52.9 s   1.76 s of compute per s of capture
+    30 s capture, 16 cores          29.2 s   0.97 s of compute per s of capture
+
+**1.81x**, and a capture now decodes in roughly the time it took to record.
+
+### Why not 10x
+
+Per block-try, measured:
+
+    turbo_decode    4.267 ms   numba, nogil    79%
+    turbo_encode    0.500 ms   numpy            9%
+    verify_block    0.498 ms   numpy/scipy      9%
+    deinterleave    0.054 ms   numpy
+    map_to_symbols  0.053 ms   numpy
+    soft_demap      0.007 ms   numba, nogil
+
+79% is parallel, the rest is GIL-bound numpy, and the front end is a fixed
+serial cost that dominates short captures. Amdahl puts the ceiling near 3.5x
+on the decode phase alone; the remaining gap would need `turbo_encode` and
+`verify_block` rewritten as nogil kernels, for 9% each.
+
+`--jobs N` or `$BGAN_JOBS` overrides the worker count; `--jobs 1` restores the
+sequential path exactly.
