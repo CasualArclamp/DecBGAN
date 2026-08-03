@@ -9,9 +9,14 @@ Provenance is recorded per item as `spec 2-1 <clause/figure>`. Do not edit a
 value here without re-checking it against the document.
 """
 
+from math import pi, sin
+
 # --- Frame geometry, Table 5.10 (clause 5.3.3) -------------------------------
 # Verified: 40 + 88 + 11968 == 12096 == 80 ms * 151.2 kBd, and
 #           11968 / 136 == 88 pilots, and 8 * 1496 == 11968.
+
+ROLLOFF = 0.25          # spec 2-1 Annex B.1 (alpha column), and clause 5.2.3
+
 
 class Bearer:
     def __init__(self, name, rs, bits_per_sym, mos, uw_syms, pilot_syms,
@@ -29,6 +34,39 @@ class Bearer:
     @property
     def encoded_syms(self):
         return self.teo * self.nblocks
+
+    @property
+    def alloc_bw(self):
+        """Allocated RF bandwidth, Hz: rs*(1+alpha). 189 kHz for F80T4.5X-8B."""
+        return self.rs*(1 + ROLLOFF)
+
+    def power_bw(self, frac=0.99):
+        """Bandwidth holding `frac` of the power of an RRC-shaped carrier, Hz.
+
+        A property of the pulse shape, not of any recording -- alpha is fixed
+        by the spec, so this never needs measuring. Root-raised-cosine power
+        |H(f)|^2 is flat to (1-a)rs/2 then falls as a raised cosine to
+        (1+a)rs/2, so the power lying within distance d of the outer edge is
+
+            P(d) = (1/2)[d - (a*rs/pi) sin(pi*d/(a*rs))]
+
+        against a total of rs. Setting P(d) = (1-frac)*rs/2 and substituting
+        t = pi*d/(a*rs) leaves t - sin(t) = pi*(1-frac)/a, solved below.
+        """
+        if not 0 < frac < 1:
+            raise ValueError("frac must be in (0, 1)")
+        a = ROLLOFF
+        target = pi*(1 - frac)/a
+        lo, hi = 0.0, pi                # t - sin t rises 0 -> pi over [0, pi]
+        if target >= pi:                    # frac so small the flat top is cut
+            return self.rs*(1 - a)*frac/(1 - a/2)
+        for _ in range(80):
+            mid = (lo + hi)/2
+            if mid - sin(mid) < target:
+                lo = mid
+            else:
+                hi = mid
+        return self.alloc_bw - 2*((lo + hi)/2)*a*self.rs/pi
 
     @property
     def trailing_syms(self):
@@ -89,7 +127,7 @@ F80T1Q1B = Bearer(
 assert F80T1Q1B.check()
 
 FRAME_MS = 80
-ROLLOFF = 0.25          # spec 2-1 Annex B.1 (alpha column), and clause 5.2.3
+# ROLLOFF is defined above the Bearer class, which derives its bandwidths.
 
 
 # --- Unique words, Figure 5.15 ----------------------------------------------

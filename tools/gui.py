@@ -14,6 +14,7 @@ import os
 import queue
 import re
 import sys
+import textwrap
 import threading
 import wave
 import traceback
@@ -25,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import tkinter as tk                                          # noqa: E402
 from tkinter import ttk, filedialog, messagebox               # noqa: E402
+import tkinter.font as tkfont                                 # noqa: E402
 
 import matplotlib                                             # noqa: E402
 matplotlib.use("TkAgg")
@@ -41,8 +43,57 @@ NL = chr(10)
 BG = "#1c1f26"
 FG = "#d8dee9"
 ACC = "#5fb3d4"
+
+# Info-panel palette. Labels recede, values come forward, and the three
+# status colours are reserved for figures that have a documented threshold --
+# so colour on this panel always means something.
+DIM = "#79839a"
+DIM2 = "#59627a"
+VAL = "#e8eef7"
 WARN = "#e0a33e"
 GOOD = "#8fbf6f"
+INFO_TAGS = {
+    "sec":  dict(foreground=ACC, spacing1=9, spacing3=4),
+    "lab":  dict(foreground=DIM),
+    "val":  dict(foreground=VAL),
+    "note": dict(foreground=DIM2),
+    "ok":   dict(foreground="#8fd18a"),
+    "warn": dict(foreground="#e8c07d"),
+    "bad":  dict(foreground="#e88388"),
+}
+LAB_W = 17          # label column width, characters
+
+
+class Fit(str):
+    """A value shortened to fit rather than wrapped over several lines.
+
+    Filenames are the case that matters: wrapping one costs three lines and
+    is harder to read than an elided middle, and both ends carry meaning --
+    the leading text names the capture, the tail carries frequency and time.
+    """
+
+
+def _elide(s, n):
+    if len(s) <= n:
+        return s
+    if n < 8:
+        return s[:n]
+    k = (n - 3)//2
+    return s[:n - 3 - k] + "..." + s[-k:]
+
+
+def _grade(v, good, ok, invert=False):
+    """Traffic light for a figure with a documented threshold.
+
+    `good`/`ok` are the boundaries; `invert` for metrics where lower is
+    better. Returns None for a value that is not finite, which leaves the
+    figure uncoloured rather than guessing at it.
+    """
+    if v is None or not np.isfinite(v):
+        return None
+    if invert:
+        return "ok" if v <= good else ("warn" if v <= ok else "bad")
+    return "ok" if v >= good else ("warn" if v >= ok else "bad")
 
 
 # --------------------------------------------------------------------------
@@ -111,7 +162,7 @@ class Worker(threading.Thread):
         r.info = dict(info)
         r.info["path"] = self.path
         r.info["file_hz"] = _freq_from_name(self.path)
-        r.info["occ_bw"] = _occupied_bw(fr[i], P[i])
+        r.info["band"] = _band(fr[i], P[i], info.get("centre", 0.0))
         r.offs, r.lvls, r.mets = offs, lvls, mets
         r.recs = [(f, b, lv, ag, bits) for f, b, lv, ag, bits in recs]
         r.const = info.get("const", np.zeros(0, complex))
@@ -192,16 +243,54 @@ def _hms(s):
     return f"{s//3600}h{(s % 3600)//60:02d}m"
 
 
-def _occupied_bw(f, p, frac=0.99):
-    """99% power bandwidth, in Hz."""
-    p = np.maximum(p - np.median(np.sort(p)[:len(p)//5]), 0)
-    c = np.cumsum(p)
-    if c[-1] <= 0:
-        return float("nan")
-    c = c/c[-1]
-    lo = f[np.searchsorted(c, (1 - frac)/2)]
-    hi = f[np.searchsorted(c, 1 - (1 - frac)/2)]
-    return float(hi - lo)
+def _band(f, p, centre, bearer=None):
+    """Where the bearer sits, plus a check that `centre` is right.
+
+    The bandwidth is NOT measured. Roll-off is a spec constant (alpha 0.25,
+    2-1 clause 5.2.3), so the occupied band follows from the symbol rate and
+    the only unknown is the centre -- which the decoder has already found.
+
+    Measuring it instead made the figure track the NOISE, not the signal. A
+    99%-of-total-power rule applied to a whole capture integrates every noise
+    bin and every other carrier in the recording, and `np.maximum(p - floor,
+    0)` half-wave rectifies a chi-squared periodogram so the residue
+    accumulates with the bin count rather than cancelling. Measured:
+
+        same synthetic bearer   166.7 kHz @ 30 dB   398.2 kHz @ 4 dB
+        BGAN1, 189 kHz signal   1924 kHz reported in a 2048 kHz capture
+        192 kHz captures        pinned at ~162 kHz -- the capture width
+
+    i.e. it returned about 94% of whatever span was recorded whenever SNR
+    was modest, and was only accidentally near-right on the cleanest files.
+
+    What IS worth measuring is whether the centre is right, so return the
+    power imbalance between the halves of the allocation. Zero dB means
+    centred; a lopsided spectrum is exactly what biased the old centroid
+    estimator (see bgan/carrier.py). Measured: synthetics -0.01..+0.05 dB,
+    512 kHz captures +0.15..+0.33, and +8.5 dB on the one file holding no
+    F80T4.5X-8B carrier at all.
+
+    The 192 kHz captures all sit near +1 dB, and that is not distortion --
+    their carriers land 8-9 kHz low, so the allocation runs past the lower
+    capture edge and the missing power shows up as upper-half bias. `clipped`
+    reports that condition directly rather than leaving it to be read out of
+    the imbalance.
+    """
+    b = bearer or spec.F80T45X8B
+    alloc = b.alloc_bw
+    if f is None:                       # no PSD to hand -- spec figures only
+        return dict(alloc=alloc, p99=b.power_bw(0.99), clipped=0.0,
+                    balance=float("nan"))
+    d = f - centre
+    ring = (np.abs(d) > alloc*0.55) & (np.abs(d) <= alloc*0.8)
+    q = p - (np.median(p[ring]) if ring.sum() >= 32 else 0.0)
+    lo = float(q[(d >= -alloc/2) & (d < 0)].sum())
+    hi = float(q[(d >= 0) & (d <= alloc/2)].sum())
+    span = float(f[-1] - f[0])
+    return dict(alloc=alloc, p99=b.power_bw(0.99),
+                clipped=max(0.0, alloc/2 + abs(centre) - span/2),
+                balance=10*np.log10(hi/lo) if lo > 0 and hi > 0
+                else float("nan"))
 
 
 # --------------------------------------------------------------------------
@@ -284,9 +373,13 @@ class App(tk.Tk):
         ttk.Label(pr, textvariable=self.statvar, width=44,
                   anchor="w").pack(side="left", padx=8)
 
-        mid = ttk.Frame(self, padding=8)
-        mid.pack(fill="both", expand=True)
+        # A paned window rather than a fixed 42-column box: the info panel
+        # holds the widest lines in the app (band edges, level histograms),
+        # and how much room they deserve depends on the capture.
+        mid = ttk.PanedWindow(self, orient="horizontal")
+        mid.pack(fill="both", expand=True, padx=8, pady=8)
 
+        plots = ttk.Frame(mid)
         self.fig = Figure(figsize=(9, 3.4), facecolor=BG, tight_layout=True)
         self.ax_psd = self.fig.add_subplot(121)
         self.ax_con = self.fig.add_subplot(122)
@@ -295,13 +388,31 @@ class App(tk.Tk):
             a.tick_params(colors=FG, labelsize=8)
             for sp in a.spines.values():
                 sp.set_color("#39404d")
-        self.canvas = FigureCanvasTkAgg(self.fig, master=mid)
-        self.canvas.get_tk_widget().pack(side="left", fill="both", expand=True)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=plots)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
-        self.infobox = tk.Text(mid, width=42, bg="#11141a", fg=FG,
-                               insertbackground=FG, relief="flat",
+        side = ttk.Frame(mid)
+        self.infobox = tk.Text(side, width=46, bg="#11141a", fg=FG,
+                               insertbackground=FG, relief="flat", wrap="none",
+                               padx=10, pady=6, cursor="arrow",
                                font=("Consolas", 9))
-        self.infobox.pack(side="left", fill="both", padx=(8, 0))
+        isy = ttk.Scrollbar(side, command=self.infobox.yview)
+        self.infobox.configure(yscrollcommand=isy.set)
+        isy.pack(side="right", fill="y")
+        self.infobox.pack(side="left", fill="both", expand=True)
+
+        self._info_font = tkfont.Font(font=self.infobox["font"])
+        for tag, opt in INFO_TAGS.items():
+            self.infobox.tag_configure(tag, **opt)
+        bold = tkfont.Font(font=self.infobox["font"])
+        bold.configure(weight="bold")
+        self.infobox.tag_configure("sec", font=bold)
+        self._info_sections, self._info_cols = [], 0
+        self.infobox.bind("<Configure>", self._info_resized)
+        self.infobox.configure(state="disabled")
+
+        mid.add(plots, weight=3)
+        mid.add(side, weight=1)
 
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -401,17 +512,17 @@ class App(tk.Tk):
         self.tab_log.insert("end", NL + NL.join(rows) + NL)
         self.tab_log.see("end")
 
-        extra = NL.join([
-            "", "", "SCAN (no decoding)",
-            f"  unique words    {uw}",
-            f"  framing runs    {len(info['runs'])}",
-            f"  UW metric       median {info['metric_med']:.1f}, "
-            f"p90 {info['metric_p90']:.1f}",
-            f"  forecast        >= {100*info['est_yield']:.0f}% of blocks",
-        ])
+        extra = [("SCAN (no decoding)", [
+            ("unique words", uw, "", None),
+            ("framing runs", str(len(info["runs"])), "", None),
+            ("UW metric", f"median {info['metric_med']:.1f}",
+             f"p90 {info['metric_p90']:.1f}", None),
+            ("forecast", f">= {100*info['est_yield']:.0f}% of blocks", "",
+             _grade(info["est_yield"], 0.80, 0.40)),
+        ])]
         self._show_info({**info, "path": p,
                          "file_hz": _freq_from_name(p),
-                         "occ_bw": float("nan")}, extra)
+                         "band": _band(None, None, 0.0)}, extra)
 
     def _no_carrier(self, rows, path):
         """Explain a capture with no F80T4.5X-8B carrier, rather than failing.
@@ -431,7 +542,7 @@ class App(tk.Tk):
                 why.append(f"clock {r['ppm']:+.0f} ppm off")
             lines.append(f"    {r['centre']/1e3:+9.1f} kHz  "
                          + ("; ".join(why) if why else "accepted"))
-        found = []
+        found, err = [], None
         try:
             from tools.scan_bearers import detect_carriers, identify
             x, sr = recv.load_wav_iq(path, secs=20)
@@ -439,23 +550,34 @@ class App(tk.Tk):
             for c in detect_carriers(x, sr):
                 best, _, _m4 = identify(x, sr, c)
                 if best:
-                    found.append(f"    {c['centre']/1e3:+9.1f} kHz  "
-                                 f"bw {c['bw']/1e3:5.1f} kHz  -> "
-                                 f"{best[0]/1e3:.1f} kBd  {best[1]}")
+                    found.append((c["centre"], c["bw"], best[0], best[1]))
         except Exception as exc:
-            found.append(f"    (bearer scan failed: {exc})")
+            err = str(exc)
         if found:
-            lines += ["", "  what this capture actually contains:"] + found
+            lines += ["", "  what this capture actually contains:"] + [
+                f"    {cen/1e3:+9.1f} kHz  bw {bw/1e3:5.1f} kHz  -> "
+                f"{rs/1e3:.1f} kBd  {name}" for cen, bw, rs, name in found]
+        if err:
+            lines += ["", f"    (bearer scan failed: {err})"]
         lines += ["", "  This decoder handles F80T4.5X-8B (151.2 kBd) only.", ""]
         self.tab_log.insert("end", NL.join(lines) + NL)
         self.tab_log.see("end")
+
+        sec = [(None, "NO USABLE CARRIER -- this decoder handles "
+                "F80T4.5X-8B (151.2 kBd) only", "", "bad")]
+        for cen, bw, rs, name in found:
+            sec.append((f"{cen/1e3:+.1f} kHz", f"{rs/1e3:.1f} kBd",
+                        f"{name}, bw {bw/1e3:.1f} kHz", None))
+        if err:
+            sec.append((None, f"bearer scan failed: {err}", "", "warn"))
+        elif not found:
+            sec.append((None, "no other bearer identified either", "", "note"))
         self._show_info(
             {"path": path, "file_hz": _freq_from_name(path), "secs": 0.0,
-             "raw_sr": 0, "centre": 0.0, "occ_bw": float("nan"), "rs": 0.0,
+             "raw_sr": 0, "centre": 0.0, "rs": 0.0,
              "ppm": 0.0, "nframes": 0, "m4": float("nan"),
              "esn0": float("nan")},
-            NL + NL + "NO USABLE CARRIER" + NL
-            + NL.join(x.strip() and "  " + x.strip() or "" for x in found))
+            [("WHAT IS ACTUALLY HERE", sec)])
 
     def _probe_path(self):
         """Read the WAV header so the length is known before decoding.
@@ -585,43 +707,155 @@ class App(tk.Tk):
         a.tick_params(colors=FG, labelsize=8)
         self.canvas.draw_idle()
 
-    def _show_info(self, i, extra=""):
+    # -- info panel ------------------------------------------------------
+    #
+    # Sections are (title, rows); a row is (label, value, note, status).
+    # label=None makes a full-width banner. Building the structure rather
+    # than pre-formatted lines is what lets a resize re-flow it.
+
+    def _info_resized(self, _evt=None):
+        if self._info_width() != self._info_cols:
+            self._render_info()
+
+    def _info_width(self):
+        w = self.infobox.winfo_width()
+        if w <= 1:
+            return 44
+        return max(30, (w - 26)//max(1, self._info_font.measure("0")))
+
+    def _render_info(self):
+        cols = self._info_cols = self._info_width()
+        # Size the label column to the labels, once for the whole panel so
+        # the sections line up. Never truncate: a clipped label ("Es/N0 (es")
+        # costs more than the character it saves.
+        labs = [len(r[0]) for _, rows in self._info_sections for r in rows
+                if r and r[0] is not None]
+        lab_w = min(LAB_W, max(labs) + 3) if labs else LAB_W
+        t = self.infobox
+        t.configure(state="normal")
+        t.delete("1.0", "end")
+        for title, rows in self._info_sections:
+            rows = [r for r in rows if r]
+            if not rows:
+                continue
+            t.insert("end", f"{title} {'-'*max(3, cols - len(title) - 1)}\n",
+                     "sec")
+            for row in rows:
+                self._info_row(row, cols, lab_w)
+        t.configure(state="disabled")
+
+    def _info_row(self, row, cols, lab_w=LAB_W):
+        t = self.infobox
+        label, value, note, status = row
+        if label is None:                       # full-width banner
+            for ln in textwrap.wrap(value, max(12, cols - 2)) or [""]:
+                t.insert("end", "  " + ln + "\n", status or "warn")
+            return
+        t.insert("end", "  " + label.ljust(lab_w - 2), "lab")
+        if len(label) > lab_w - 3:              # longer than its column
+            t.insert("end", "\n" + " "*lab_w)
+
+        if isinstance(value, Fit):      # one token, so internal spaces survive
+            words = [(_elide(str(value), max(8, cols - lab_w)),
+                      status or "val")]
+        else:
+            words = [(w, status or "val") for w in str(value).split()]
+        if note:
+            words += [(w, "note") for w in str(note).split()]
+        avail = max(8, cols - lab_w)
+        flat = []
+        for w, tag in words:                    # hard-split unbreakable tokens
+            while len(w) > avail:               # (long filenames, mostly)
+                flat.append((w[:avail], tag))
+                w = w[avail:]
+            flat.append((w, tag))
+
+        col, started = lab_w, False
+        for w, tag in flat:
+            if started and col + 1 + len(w) > cols:
+                t.insert("end", "\n" + " "*lab_w)
+                col, started = lab_w, False
+            if started:
+                t.insert("end", " ")
+                col += 1
+            t.insert("end", w, tag)
+            col += len(w)
+            started = True
+        t.insert("end", "\n")
+
+    def _show_info(self, i, extra=()):
+        # Rows are omitted rather than shown as placeholders. The no-carrier
+        # path has no symbol rate, no frames and no M4/M2^2, and printing
+        # "0.000 Bd" and "nan" for them reads as a broken decode instead of
+        # an absent one.
         hz = i.get("file_hz")
-        cen = (f"{(hz + i['centre'])/1e6:.6f} MHz"
-               if hz else f"{i['centre']:+.1f} Hz from capture centre")
-        txt = [
-            "CARRIER",
-            f"  file            {Path(i['path']).name[:34]}",
-            f"  capture         {i['secs']:.1f} s @ {i['raw_sr']/1e3:.0f} kHz",
-            f"  centre          {cen}",
-            f"  carrier offset  {i['centre']:+.1f} Hz",
-            f"  occupied BW     {i['occ_bw']/1e3:.1f} kHz (99% power)",
-            "",
-            "BEARER",
-            "  type            F80T4.5X-8B (16-QAM)",
-            f"  symbol rate     {i['rs']:.3f} Bd  ({i['ppm']:+.2f} ppm)",
-            "  nominal         151200 Bd, 80 ms frame = 12096 sym",
-            f"  frames in file  {i['nframes']}",
-            "",
-            "QUALITY",
-            f"  M4/M2^2         {i['m4']:.3f}   "
-            f"(16QAM 1.32 / QPSK 1.00 / noise 2.00)",
-            f"  Es/N0 (est)     {i['esn0']:.1f} dB",
-        ]
+        car = [("file", Fit(Path(i["path"]).name.strip()), "", None)]
+        if i.get("secs"):
+            car.append(("capture", f"{i['secs']:.1f} s",
+                        f"@ {i['raw_sr']/1e3:.0f} kHz" if i.get("raw_sr")
+                        else "", None))
+        car.append(("centre", f"{(hz + i['centre'])/1e6:.6f} MHz" if hz
+                    else f"{i['centre']:+.1f} Hz",
+                    "" if hz else "from capture centre", None))
+        if i.get("centre"):
+            car.append(("carrier offset", f"{i['centre']:+.1f} Hz", "", None))
+        b = i.get("band")
+        if b:
+            if hz:
+                lo = (hz + i["centre"] - b["alloc"]/2)/1e6
+                car.append(("occupied band",
+                            f"{lo:.4f} - {lo + b['alloc']/1e6:.4f} MHz",
+                            "", None))
+            car.append(("occupied BW", f"{b['alloc']/1e3:.1f} kHz",
+                        f"allocated, {b['p99']/1e3:.1f} kHz 99% power "
+                        f"(alpha {spec.ROLLOFF}, from spec -- not measured)",
+                        None))
+            if np.isfinite(b["balance"]):
+                bal = 0.0 if abs(b["balance"]) < 0.005 else b["balance"]
+                car.append(("band symmetry", f"{bal:+.2f} dB",
+                            "upper/lower (0 = centred)",
+                            _grade(abs(bal), 0.5, 1.5, invert=True)))
+            if b.get("clipped", 0) > 0:
+                car.append((None, f"** {b['clipped']/1e3:.1f} kHz of the "
+                            f"allocation falls outside the capture",
+                            "", "bad"))
+
+        bearer = [("type", "F80T4.5X-8B", "(16-QAM)", None)]
+        if i.get("rs"):
+            bearer.append(("symbol rate", f"{i['rs']:.3f} Bd",
+                           f"({i['ppm']:+.2f} ppm)",
+                           _grade(abs(i["ppm"]), 5.0, 50.0, invert=True)))
+        bearer.append(("nominal", "151200 Bd",
+                       "(80 ms frame = 12096 sym)", None))
+        if i.get("nframes"):
+            bearer.append(("frames in file", str(i["nframes"]), "", None))
+
+        qual = []
+        if np.isfinite(i.get("m4", float("nan"))):
+            qual.append(("M4/M2^2", f"{i['m4']:.3f}",
+                         "(16QAM 1.32 / QPSK 1.00 / noise 2.00)",
+                         _grade(abs(i["m4"] - 1.32), 0.10, 0.30, invert=True)))
+        if np.isfinite(i.get("esn0", float("nan"))):
+            qual.append(("Es/N0 (est)", f"{i['esn0']:.1f} dB", "",
+                         _grade(i["esn0"], 10.0, 6.0)))
         # Unique-word EVM is the only figure here that predicts a residual
         # carrier offset. The UW correlation metric does not -- being
         # differential, it stays at 60-72 on captures that decode nothing.
         if np.isfinite(i.get("uw_evm", float("nan"))):
-            txt.append(f"  UW EVM          {i['uw_evm']:.3f}   "
-                       f"(~0.17 decodes, ~0.45 does not)")
+            qual.append(("UW EVM", f"{i['uw_evm']:.3f}",
+                         "(~0.17 decodes, ~0.45 does not)",
+                         _grade(i["uw_evm"], 0.25, 0.45, invert=True)))
         if i.get("jobs"):
-            txt.append(f"  decode threads  {i['jobs']}")
+            qual.append(("decode threads", str(i["jobs"]), "", None))
         if i.get("cfo_applied"):
-            txt.append(f"  carrier resid   {i['cfo_hz']:+.1f} Hz removed"
-                       + ("  (past pilot-unwrap limit)"
-                          if abs(i["cfo_hz"]) > 552.0 else ""))
-        self.infobox.delete("1.0", "end")
-        self.infobox.insert("end", "\n".join(txt) + extra)
+            past = abs(i["cfo_hz"]) > 552.0
+            qual.append(("carrier resid", f"{i['cfo_hz']:+.1f} Hz removed",
+                         "(past pilot-unwrap limit)" if past else "",
+                         "warn" if past else None))
+
+        self._info_sections = [("CARRIER", car), ("BEARER", bearer),
+                               ("QUALITY", qual)] + list(extra)
+        self._render_info()
 
     # -- completion ------------------------------------------------------
 
@@ -639,33 +873,35 @@ class App(tk.Tk):
             byb[b] += 1
             lv[l] = lv.get(l, 0) + 1
         ags = [x[3] for x in r.recs]
-        extra = [
-            "", "DECODE",
-            f"  blocks          {n}/{tot}  ({100*n/max(tot,1):.1f}%)",
-            "  per block idx   " + " ".join(str(v) for v in byb),
-            f"  median agree    {np.median(ags):.3f}" if ags else "",
-            "  levels          " + ", ".join(
+        pct = 100*n/max(tot, 1)
+        dec = [
+            ("blocks", f"{n}/{tot}", f"({pct:.1f}%)", _grade(pct, 80.0, 40.0)),
+            ("per block idx", " ".join(str(v) for v in byb), "", None),
+            ("median agree", f"{np.median(ags):.3f}", "",
+             _grade(float(np.median(ags)), 0.85, 0.75)) if ags else None,
+            ("levels", ", ".join(
                 f"{k}:{v}" for k, v in sorted(lv.items(), key=lambda kv: -kv[1])
-            )[:60],
-            f"  payload         {len(r.payload)} bytes",
+            ), "", None),
+            ("payload", f"{len(r.payload):,} bytes", "", None),
         ]
         if r.payload:
-            z = r.payload.count(0)/len(r.payload)
-            extra.append(f"  zero bytes      {100*z:.1f}%")
+            z = 100*r.payload.count(0)/len(r.payload)
+            dec.append(("zero bytes", f"{z:.1f}%", "", None))
+        extra = [("DECODE", dec)]
         if r.bulletins:
             bb = r.bulletins[0][1]
-            extra += [
-                "", "BEARER CONTROL",
-                f"  BulletinBoards  {len(r.bulletins)}"
-                + (f" every {r.bb_period} frames" if r.bb_period else ""),
-                f"  rnc-id / bct-id {bb.rnc_id} / {bb.bct_id}",
-                f"  f-bearer        {bb.f_bearer}   net-ver {bb.net_ver}",
-                f"  spot-beam-id    {bb.spot_beam_id}",
+            bc = [
+                ("BulletinBoards", str(len(r.bulletins)),
+                 f"every {r.bb_period} frames" if r.bb_period else "", None),
+                ("rnc-id/bct-id", f"{bb.rnc_id} / {bb.bct_id}", "", None),
+                ("f-bearer", str(bb.f_bearer), f"net-ver {bb.net_ver}", None),
+                ("spot-beam-id", str(bb.spot_beam_id), "", None),
             ]
             plmn = _plmn(bb)
             if plmn:
-                extra.append(f"  PLMN            {plmn}")
-        self._show_info(r.info, "\n" + "\n".join(x for x in extra if x != ""))
+                bc.append(("PLMN", plmn, "", None))
+            extra.append(("BEARER CONTROL", bc))
+        self._show_info(r.info, extra)
 
         self._fill_interesting(r)
         self._fill_files(r)
