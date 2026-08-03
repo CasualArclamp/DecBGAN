@@ -133,11 +133,11 @@ def probe_centre(x, sr, centre, sps=4, nframes=6, ntau=1):
         hits, floor, lvls = [], [], []
         for f in range(nfr):
             got = _corr(d, 1 + f*MOS, MOS, pats)
-            if got:
-                hits.append(got[0])
-                lvls.append(got[2])
-            # deliberately wrong offset, to calibrate this capture's floor
-            off = _corr(d, 1 + f*MOS + MOS//3, MOS//8, pats)
+            if not got:
+                continue
+            hits.append(got[0])
+            lvls.append(got[2])
+            off = floor_corr(d, got[1], pats)   # half a frame from this UW
             if off:
                 floor.append(off[0])
         if not hits:
@@ -296,6 +296,33 @@ def _corr(d, start, span, pats):
         if best is None or c[j] > best[0]:
             best = (float(c[j]), start + j - 1, l)
     return best
+
+
+def floor_corr(d, uw_pos, pats, span=None):
+    """UW correlation half a frame away from a known UW, to calibrate noise.
+
+    This is how a capture's own noise floor is measured, so that the
+    accept/reject ratio in pick_carrier adapts instead of relying on an
+    absolute number.
+
+    The window is placed relative to the UW that was actually found, NOT at a
+    fixed fraction of the frame. It used to sit at frame_start + MOS//3 with
+    width MOS//8, which is a sub-window of the full-frame search that finds
+    the UW -- so whenever a capture's framing put its UW in that 1512-symbol
+    slice, the "deliberately wrong" offset landed exactly on the real unique
+    word. Floor then equalled metric, the ratio came out at 1.00 against a
+    1.8 threshold, and the carrier was rejected as absent.
+
+    That is a one-in-eight lottery on where the frame boundary falls, and
+    BGAN15 lost it: UW offset 4245, floor window [4032, 5544), metric and
+    floor identical to three figures at every candidate centre, while its
+    151.2 kBd tone stands 20.9 dB above the floor -- the same as two captures
+    that decode.
+
+    At MOS//2 the window is 6048 symbols from this frame's UW and 4536 from
+    the next, so no framing can put a unique word inside it.
+    """
+    return _corr(d, uw_pos + MOS//2, span or MOS//8, pats)
 
 
 def track_offsets(s, win=320, levels=None):
@@ -570,7 +597,7 @@ def survey(path, secs=None, ntau=TAU_STEPS, progress=None, offset=0.0,
     d2[0] = 0
     d2[1:] = s[1:]*np.conj(s[:-1])
     pats2 = {lv: diff_uw(lv) for lv in spec.LEVELS_F80T45X8B}
-    fl = [ _corr(d2, 1 + f*MOS + MOS//3, MOS//8, pats2)
+    fl = [ floor_corr(d2, int(offs[f]), pats2)
            for f in range(min(20, len(offs))) ]
     floor = float(np.median([g[0] for g in fl if g])) if any(fl) else 1.0
     good = float(np.mean(mets > 1.8*floor)) if len(mets) else 0.0
