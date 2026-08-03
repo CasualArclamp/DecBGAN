@@ -7,9 +7,9 @@ targeting decision is auditable.
 
 RTL-SDR v4 (R828D + RTL2832U, **8-bit ADC**) + RTL-SDR Blog L-band patch
 antenna with integrated LNA. Relevant limits:
-- Supported sample rates: **225–300 kHz** and **900 kHz–3.2 MHz**. Nothing in
+- Supported sample rates: **225â€“300 kHz** and **900 kHzâ€“3.2 MHz**. Nothing in
   between, so 302.4 kHz (2 sps) and 604.8 kHz (4 sps) are both unreachable.
-- 8-bit ADC makes input level matter a great deal — see below.
+- 8-bit ADC makes input level matter a great deal â€” see below.
 
 ## Files
 
@@ -18,30 +18,30 @@ IQ correction on, PPM 0, 16-bit baseband via SDR++.
 
 | File | Centre | Rate | Dur | Carriers | Es/N0 | C/N0 |
 |---|---|---|---|---|---|---|
-| `BGAN very strong ...1543100000Hz` | 1543.100 MHz | 512 kHz | 60 s | 1 @ −0.4 kHz | **16.97 dB** | **68.8 dBHz** |
+| `BGAN very strong ...1543100000Hz` | 1543.100 MHz | 512 kHz | 60 s | 1 @ âˆ’0.4 kHz | **16.97 dB** | **68.8 dBHz** |
 | BGAN1.wav | ? | 2.048 MHz | 92.7 s | 1 centred | 14.1 dB | 65.9 dBHz |
-| BGAN2.wav | ? | 2.048 MHz | 74.8 s | 1 centred | — | — |
+| BGAN2.wav | ? | 2.048 MHz | 74.8 s | 1 centred | â€” | â€” |
 | `...1547298000Hz` | 1547.298 MHz | 512 kHz | 60 s | 1 @ +0.1 kHz | 9.53 dB | 61.3 dBHz |
-| `...1550398000Hz` | 1550.398 MHz | 512 kHz | 57 s | 2 @ ∓100 kHz | 5.58 / 9.41 dB | 57.4 / 61.2 |
-| `...1553500700Hz` | 1553.5007 MHz | 512 kHz | 62 s | 1 @ −1.2 kHz | 8.88 dB | 60.7 dBHz |
-| BGAN3,4,6,7,8,9,10,15 | ? | 192 kHz | 4–32 s | 1, fills band | unmeasurable | — |
+| `...1550398000Hz` | 1550.398 MHz | 512 kHz | 57 s | 2 @ âˆ“100 kHz | 5.58 / 9.41 dB | 57.4 / 61.2 |
+| `...1553500700Hz` | 1553.5007 MHz | 512 kHz | 62 s | 1 @ âˆ’1.2 kHz | 8.88 dB | 60.7 dBHz |
+| BGAN3,4,6,7,8,9,10,15 | ? | 192 kHz | 4â€“32 s | 1, fills band | unmeasurable | â€” |
 
 **Primary development target: the 1543.100 MHz capture.** At +12.0 dB margin
-over L3 it clears every FEC level including H6 — the only capture that does.
+over L3 it clears every FEC level including H6 â€” the only capture that does.
 BGAN1 is the secondary cross-check (independent, different day and centre
 frequency, so a genuine second test rather than a re-run).
 
 Carrier spacing measured at **200.6 kHz** (the 200 kHz raster) from the
 two-carrier 1550.398 MHz capture.
 
-All captures show the 151.2 kBd timing tone. The apparent −0.8 Hz error is
+All captures show the 151.2 kBd timing tone. The apparent âˆ’0.8 Hz error is
 FFT bin quantisation (3.9 Hz bins), not a clock offset.
 
 512 kHz with SDR++ 4x decimation is a good operating point: it holds the
 189 kHz carrier plus clean noise-reference regions either side, and the
 decimation buys ~6 dB against 8-bit quantisation noise.
 
-**Do not chase input level.** At rms ~0.017–0.033 FS the quantisation noise
+**Do not chase input level.** At rms ~0.017â€“0.033 FS the quantisation noise
 floor sits roughly 13 dB below the measured noise floor, so thermal noise
 dominates and extra ADC headroom would buy nothing. Gain is already maxed.
 
@@ -49,7 +49,7 @@ dominates and extra ADC headroom would buy nothing. Gain is already maxed.
 
 At 192 kHz the 189 kHz carrier occupies essentially the whole band, so there
 is **no noise-only region in the capture**. Any Es/N0 or SNR estimate derived
-from these files is meaningless — there is nothing to reference the noise
+from these files is meaningless â€” there is nothing to reference the noise
 against. The previous project's "~3.7 dB Es/N0" figure is almost certainly
 this artifact, and it appears to have motivated loosening the turbo decoder's
 parity-agreement threshold from 0.85 to 0.58, which manufactures false
@@ -58,7 +58,7 @@ positives rather than recovering data.
 That last sentence has since been measured rather than asserted, and it holds
 **for 0.58 specifically**: blocks that cannot possibly decode reach 0.6023
 agreement, so 0.58 sits inside the false-positive distribution. Note what the
-same measurement says about the rest of the range — correct decodes never
+same measurement says about the rest of the range â€” correct decodes never
 fall below 0.7585, so our own 0.90 was too *tight* by as much as 0.58 was too
 loose. Both errors came from picking a number without a labelled negative
 set. See docs/VALIDATION.md.
@@ -91,12 +91,12 @@ decoding problem is entirely in software.
 ## Recording advice for future captures
 
 1. **Raise the RTL gain.** Peaks at 0.115 FS on an 8-bit ADC means roughly 15
-   of 255 counts are in use — about 4 effective bits. Target peaks near 0.5 FS.
+   of 255 counts are in use â€” about 4 effective bits. Target peaks near 0.5 FS.
    This is free SNR and costs nothing.
 2. **Keep 2.048 MHz** (or 1.024 MHz, which has fewer strong in-band
    neighbours and so suffers less 8-bit dynamic-range pressure). Do not record
    at 192 kHz.
-3. **AGC off**, fixed manual gain — amplitude wander smears the constellation
+3. **AGC off**, fixed manual gain â€” amplitude wander smears the constellation
    and is indistinguishable from noise after the fact.
 4. Note the exact centre frequency with each capture.
 
@@ -341,10 +341,10 @@ carriers at -175.4, -25.9, +24.6, +74.1 kHz.
 
 | property | value |
 |---|---|
-| symbol rate | **33 600.3 Hz** — exactly nominal, all four carriers |
+| symbol rate | **33 600.3 Hz** â€” exactly nominal, all four carriers |
 | bandwidth | 37-41 kHz (42 kHz channel) |
 | frame period | **exactly 2688 symbols** (0.176 at lag 2688 vs 0.015 either side; 5376 also present) |
-| modulation | **QPSK**, i.e. F80T1Q-4B — see below |
+| modulation | **QPSK**, i.e. F80T1Q-4B â€” see below |
 | UW / pilots | **absent** |
 
 2688 symbols is exactly 80 ms at 33.6 kBd. So a second, independent bearer type
@@ -359,12 +359,12 @@ separated frequencies (1532 vs 1543-1553 MHz) all behave the same way.
 
 `tools/scan_bearers.py` initially labelled these 16-QAM. That was wrong and the
 classifier has been left deliberately conservative as a result. M4/M2^2 came out
-**1.239-1.295**, which is *below* 16-QAM's floor of 1.32 — impossible at any
+**1.239-1.295**, which is *below* 16-QAM's floor of 1.32 â€” impossible at any
 SNR, because noise only moves the statistic upward from the constellation's own
 value. QPSK's floor is 1.00 and it reads ~1.25 at 8 dB. Also mean|s| is uniform
 at 0.95 across UW, pilot and data positions, as constant-modulus demands.
 
-**Do not classify modulation from M4/M2^2 alone** — the QPSK-plus-noise and
+**Do not classify modulation from M4/M2^2 alone** â€” the QPSK-plus-noise and
 16-QAM-plus-noise ranges overlap. Use the amplitude histogram or the
 constellation.
 
@@ -376,7 +376,7 @@ constellation.
    for 16-QAM data. It is only meaningful for 16-QAM.
 
 2. **Autocorrelating the coherence profile to find the pilot comb.** Real
-   scored 0.767 at lag 30, the synthetic control 0.754 — no discrimination,
+   scored 0.767 at lag 30, the synthetic control 0.754 â€” no discrimination,
    because both are dominated by broad structure rather than the comb.
 
 ## The statistic that does work
@@ -416,7 +416,7 @@ not pilots.
 
 1. **A symbol-level randomisation tied to frame number**, applied after frame
    assembly. This would leave the constellation and the frame period intact
-   while making no position constant across frames — which is precisely the
+   while making no position constant across frames â€” which is precisely the
    observed signature. Clause 5.3.7's "Unique Words and Pilot Symbols are not
    scrambled" refers to the *bit* scrambler before FEC, and would not preclude
    it. Caveat: for the 16-QAM carriers a pure *rotation* is excluded, because
@@ -744,7 +744,7 @@ really are worse, but not for any reason yet identified. Next thing to try is
 the timing phase resolution (ntau) and the matched-filter roll-off, since both
 affect EVM without touching PSD SNR.
 
-## Segmented decoding — tried, measured, left off by default (Aug 2026)
+## Segmented decoding â€” tried, measured, left off by default (Aug 2026)
 
 The carrier wanders within a capture. One 60 s file fits **+198.9 Hz** globally
 but **-152.1 Hz** over the eight seconds at t=15 s. That file decodes 0 of 6048
@@ -774,9 +774,9 @@ the explanation for that one. Its first ten seconds carry no decodable data at
 any of the top five UW peaks across all eight timing phases (best agreement
 0.54), and the whole-file decode finds nothing anywhere.
 
-## Three defects behind every "frames cleanly, decodes nothing" capture (Aug 2026)
+## Four defects behind every "frames cleanly, decodes nothing" capture (Aug 2026)
 
-All three were found chasing the same symptom, and none is what the symptom
+All four were found chasing the same symptom, and none is what the symptom
 looked like. The user's read of the waterfall started this: two screenshots
 side by side, one carrier flat-topped and one domed. That shape difference
 did more diagnostic work than the ten scalar measurements before it.
@@ -875,7 +875,7 @@ touching it.
 ### 3. The carrier probe inherited the bug survey_taus exists to fix
 
 With the first two fixed, `1553.500` still came back "no F80T4.5X-8B carrier
-found" — but only at some capture lengths. Its UW metric by window:
+found" â€” but only at some capture lengths. Its UW metric by window:
 
     6 s   8 s   10 s   12 s   16 s   20 s
     54.2  49.0  50.8   22.7   49.3   44.1
@@ -918,3 +918,48 @@ Fixed by blanking hints outside the bearer's ten levels so the block is
 searched instead. Worth stating as a rule: a value read out of decoded traffic
 is untrusted input, and using it to index a table of files is enough to lose a
 whole capture.
+
+### 4. The noise floor was measured on top of the unique word
+
+`pick_carrier` accepts a candidate on metric/floor, where the floor is the
+same UW correlation taken at a deliberately wrong offset in the same capture.
+Measuring it that way is right -- it adapts to each recording instead of
+relying on an absolute number. Measuring it at **frame_start + MOS//3** was
+not.
+
+That window, MOS//8 wide, is a sub-window of the full-frame search that finds
+the UW in the first place. So whenever a capture's framing happens to put its
+unique word in that 1512-symbol slice, the "wrong" offset lands exactly on the
+right one. Floor equals metric, the ratio comes out at 1.00 against a
+threshold of 1.8, and a perfectly good carrier is reported as absent.
+
+It is a one-in-eight lottery on where the frame boundary falls, and BGAN15
+lost it:
+
+    BGAN15   UW offset within frame 4245     floor window [4032, 5544)
+             metric 60.3, floor 60.3, ratio 1.00 at every candidate centre
+    BGAN10   UW offset within frame 6853     outside -> ratio 3.30
+    BGAN9    UW offset varies 2077..4842     1 frame of 6 inside
+
+Nothing was wrong with BGAN15. Its 151.2 kBd tone stands 20.9 dB above the
+floor, identical to BGAN9 and BGAN10 which both decode, and its crest factor
+is 2.67 against their 2.77 and 2.86. The three-significant-figure equality of
+metric and floor was the tell: two independent measurements do not agree to
+three figures unless they are the same measurement.
+
+`floor_corr` now places the window half a frame from the UW that was actually
+found, so it sits 6048 symbols from this frame's unique word and 4536 from
+the next. No framing can put one inside it.
+
+    BGAN15 after the fix:  ratio 1.00 -> 3.18,  nocarrier -> 1165/1184 (98.4%)
+
+which is the highest yield of any capture in the set. The same wrong window
+was also calibrating `survey()`'s yield forecast, and is fixed there too.
+
+Third instance of the same class of mistake in this file: a diagnostic that
+shares structure with the thing it is supposed to be independent of. The
+pilot phase fit could not clear a carrier offset that breaks pilot phase
+fitting; the differential UW metric could not see an offset it cancels; and
+a noise floor measured inside the signal search window cannot calibrate that
+search. **Check what a "control" measurement has in common with the thing it
+is controlling for.**

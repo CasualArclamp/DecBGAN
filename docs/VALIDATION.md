@@ -617,12 +617,19 @@ correction, acceptance threshold 0.90, single-phase carrier probe.
     1547.298              15.8%       92.7%        +103.9 Hz    threshold
     BGAN9             nocarrier       92.6%       -2418.5 Hz    carrier offset
     BGAN10                 0.0%       88.2%       -2532.4 Hz    carrier offset
-    BGAN15            nocarrier   nocarrier                     unchanged
+    BGAN15            nocarrier       98.4%        -611.3 Hz    floor window
     1532.200          nocarrier   nocarrier                     correct: 33.6 kBd only
 
 Unique-word EVM before and after correction, same order: 0.199->0.169,
 0.464->0.146, 1.007->0.305, 0.414->0.353, 0.263->0.261, 2.029->0.193,
-2.286->0.201.
+2.286->0.201, 0.348->0.165.
+
+BGAN15 was added by the fourth fix (the noise-floor window) and needed all of
+them: the floor fix to be found at all, then the carrier correction and the
+threshold to decode. Its row reads nocarrier against the state before that
+fix. Note the OLD column of the harness shares the corrected floor code, so
+re-running it now reports 0/1184 for BGAN15 rather than nocarrier -- the
+carrier is located but nothing decodes without the other two fixes.
 
 Three things worth reading off this table:
 
@@ -647,9 +654,61 @@ Synthetic captures, all 9 s, old against new:
     R 12 dB +100 kHz  888/888  ->  888/888   (100%)
     L3 4 dB threshold   0/888  ->  735/888   ( 82.8%)
 
+and the same at 12 s, after the noise-floor fix, confirming it disturbs
+nothing: 992/992 on all four clean files and 0/992 -> 820/992 at 4 dB.
+
 The 4 dB file is the strongest single result here, because it has ground
 truth and sits **below** the 5-12 dB range the threshold was calibrated over.
 All 735 accepted blocks are **bit-exact against the transmitted payload, zero
 wrong**, and all 735 are at the transmitted level L3. So the threshold does
 not start manufacturing blocks as soon as it leaves its calibration range;
 the decoder simply stops finding them.
+
+### BGAN15 — recovered by the floor fix, and it decodes to clear text
+
+`pick_carrier` had been rejecting this capture outright because its unique
+word happened to sit inside the window used to measure the noise floor (see
+docs/SIGNAL_NOTES.md, defect 4). With the floor placed half a frame from the
+UW instead, over 20 s:
+
+    1956/1984 blocks (98.6%)
+    carrier offset -530.8 Hz,  UW EVM 0.314 -> 0.168
+    BulletinBoard frame-no  14/247 on-cycle (chance 0.06), period 17
+    AVP-predicted levels    1515 agree / 0 disagree
+    levels  L3 781, H5 441, H3 246, H6 141, H1 139
+
+The level spread is itself informative: a real traffic mix across five coding
+levels, not the single level a decoder locking onto one artifact would give.
+
+The payload contains protocol text in clear:
+
+    HEAD / HTTP/1.0
+    Accept: */*
+    User-Agent: WhatsUp/1.0
+    victronenergy
+    California1
+
+A 12 s decode of the same file also yields a complete HTTP response,
+
+    HTTP/1.1 304 Not Modified
+    Content-Type: application/pkix-crl
+    Cache-Control: public, max-age=474
+    Connection: keep-alive
+
+whose MIME type is the one for a certificate revocation list, matching the
+DigiCert CRL URLs already recovered from BGAN19 -- and several dozen lines of
+consistent ASCII-art logo (`MMMMMMMMMMO. lWMMMMMMMMMMMMMMMMMMWc .OMMMMMMMMMM`
+and so on), interrupted only where a block failed to decode.
+
+None of that can arise from noise, and it is independent of every threshold
+and estimator in this repository. A four-header HTTP response with a correct
+and contextually apt MIME type is not something a mis-tuned acceptance test
+can fabricate. `WhatsUp/1.0` is the same user agent
+recovered from BGAN19, so this is the same network. `victronenergy` is marine
+and solar power equipment, which is what sits behind a BGAN terminal.
+`California1` is an X.509 subject fragment (`ST=California`), consistent with
+the certificate chains already recovered.
+
+Note its offset, -530.8 Hz, is just *inside* the 552 Hz pilot-unwrap cliff.
+So BGAN15 needed the floor fix to be found at all; the carrier correction then
+took its unique-word EVM from 0.314 to 0.168.

@@ -36,11 +36,15 @@ Being precise about this, because the gap is real:
   with dropped samples invalidates (see docs/VALIDATION.md). Weak or
   interference-hit captures still do worse.
 - **Captures down to ~5 dB Es/N0 decode**, where previously nothing below
-  9 dB did. Two separate defects caused that, both found in Aug 2026: a
+  9 dB did. Four separate defects caused that, all found in Aug 2026: a
   biased spectral-centroid carrier estimate that left several hundred Hz of
   offset — enough to break the pilot phase unwrap and kill every block in a
-  frame — and a block-acceptance threshold placed inside the range that
-  correct decodes occupy rather than above the range that wrong ones do. See
+  frame; a block-acceptance threshold placed inside the range that correct
+  decodes occupy rather than above the range that wrong ones do; a carrier
+  probe that judged candidates at a single timing phase; and a noise-floor
+  measurement taken inside the very window used to find the signal, which
+  rejected outright any capture whose framing put its unique word there.
+  Six captures that decoded nothing now decode, four of them above 88%. See
   docs/SIGNAL_NOTES.md and docs/VALIDATION.md.
 - **No protocol demux.** Payload is decoded FEC blocks concatenated, with
   silent gaps where blocks failed. IP packets are *carved* by scanning for
@@ -154,7 +158,7 @@ Recorded with an RTL-SDR v4 and an L-band patch antenna, via SDR++:
 
 ## Validation
 
-Full detail in [`docs/VALIDATION.md`](docs/VALIDATION.md). Four independent
+Full detail in [`docs/VALIDATION.md`](docs/VALIDATION.md). Five independent
 lines of evidence, summarised:
 
 **1. Codec against the standard's own numbers.** `tests/waterfall.py` finds
@@ -164,7 +168,14 @@ mean margin **+1.95 dB**, range +1.62 to +2.69, flat across levels.
 **2. Traffic that cannot come from noise.** Decoding a real capture recovers a
 DER-valid X.509 chain (`http://crl3.digicert.com/DigiCertGlobalRootG2.crl`,
 correct SEQUENCE tags, extension OIDs, the DigiCert CPS arc), a well-formed
-HTTP request, and coherent application data.
+HTTP request, and coherent application data. BGAN15, recovered in Aug 2026
+from a capture that previously reported no carrier at all, independently
+yields `HEAD / HTTP/1.0`, `User-Agent: WhatsUp/1.0` — the same user agent as
+the first capture, so the same network — plus `victronenergy`, an
+`ST=California` certificate subject fragment, dozens of lines of consistent
+ASCII-art logo, and a complete four-header HTTP response whose
+`Content-Type: application/pkix-crl` is exactly the MIME type for the
+certificate revocation lists the other capture was fetching.
 
 **3. A counter the network maintains, not us.** The BulletinBoard's 12-bit
 `frame-no` must advance one per 80 ms frame, so `(frame_no - frame_index) mod
