@@ -25,7 +25,11 @@ Written in Python with numba for the turbo decoder. No compiler needed.
   `ForwardBearerCodeRateParam` extraction (TS 102 744-3-1)
 - **Output** — printable-string extraction, IPv4 carving with header-checksum
   validation, pcap export
-- **GUI** — spectrum, live constellation, carrier/bearer info, strings, packets
+- **Findings** — X.509 certificates, DNS messages, HTTP transactions and TLS
+  handshakes carved from the payload, plus the set of hostnames they
+  implicate. Structurally validated: 0 false accepts per 8 MB of random bytes
+- **GUI** — spectrum, live constellation, carrier/bearer info, and tabs for
+  findings, strings, bearer control and carved packets
 
 ## What it does *not* do
 
@@ -107,8 +111,14 @@ python tools/gui.py path/to/capture.wav
 ```
 
 Spectrum and live constellation, a progress bar, carrier and bearer-control
-readouts, then tabs for strings, parsed BulletinBoards, carved packets and a
-log. Export buttons produce a lossless block pcap, a carved-IPv4 pcap, or the
+readouts, then tabs for findings, strings, parsed BulletinBoards, carved
+packets and a log.
+
+**Interesting** is the first tab and leads with the hostnames the capture
+implicates, then the certificates, DNS messages, TLS handshakes and HTTP
+transactions behind them. Everything there is carved rather than reassembled,
+so anything spanning a failed block is lost — certificates in particular
+rarely parse whole and are usually recovered from their validity block. Export buttons produce a lossless block pcap, a carved-IPv4 pcap, or the
 raw payload; each is named after the capture it came from, so exports from
 different recordings do not collide.
 

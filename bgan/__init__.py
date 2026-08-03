@@ -24,6 +24,7 @@ Submodules, roughly bottom-up:
     bctrl     ForwardBearerCodeRateParam, per-block level resolution (3-1)
     bulletin  BulletinBoard SDU and AVP list walking (3-1 clause 5.4.3)
     pcapout   pcap writers and IPv4 carving
+    findings  certificates, DNS, HTTP and TLS carved from a payload
     tx        reference transmitter, used to validate the receiver
 
 Importing this package does not pull in numba or scipy; submodules are left to
@@ -39,5 +40,5 @@ __version__ = "0.3.0"
 
 __all__ = [
     "annex", "bctrl", "bulletin", "carrier", "decoder", "mod", "pcapout",
-    "pipeline", "recv", "spec", "turbo", "tx",
+    "findings", "pipeline", "recv", "spec", "turbo", "tx",
 ]
