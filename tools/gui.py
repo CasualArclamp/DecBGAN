@@ -36,7 +36,7 @@ from matplotlib.backends.backend_tkagg import (                # noqa: E402
 from scipy.signal import welch                                # noqa: E402
 
 from bgan import (spec, mod, recv, bulletin, pcapout,          # noqa: E402
-                  findings, update)
+                  findings, sip, update)
 from tools.decode_wav import (decode_capture, survey, NoCarrier,  # noqa: E402
                               channelise, safe_stem, MOS)
 
@@ -453,6 +453,7 @@ class App(tk.Tk):
         nb.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.tab_int = self._textpage(nb, "Interesting")
         self.tab_files = self._textpage(nb, "Files")
+        self.tab_sip = self._textpage(nb, "SIP")
         self.tab_str = self._textpage(nb, "Strings")
         self.tab_bb = self._textpage(nb, "Bearer control")
         self.tab_pkt = self._textpage(nb, "Packets")
@@ -658,8 +659,8 @@ class App(tk.Tk):
                       f"{self.probe['secs']:.1f} s - using the whole file")
             secs = self.probe["secs"]
             self.secsvar.set(f"{secs:.1f}")
-        for t in (self.tab_int, self.tab_files, self.tab_str, self.tab_bb,
-                  self.tab_pkt, self.tab_log):
+        for t in (self.tab_int, self.tab_files, self.tab_sip, self.tab_str,
+                  self.tab_bb, self.tab_pkt, self.tab_log):
             t.delete("1.0", "end")
         self.stop.clear()
         self.result = None
@@ -942,6 +943,7 @@ class App(tk.Tk):
 
         self._fill_interesting(r)
         self._fill_files(r)
+        self._fill_sip(r)
         self._fill_strings(r)
         self._fill_bb(r)
         self._fill_pkts(r)
@@ -992,6 +994,61 @@ class App(tk.Tk):
             else:
                 for k in range(0, min(len(body), 96), 32):
                     t.insert("end", f"      {body[k:k+32].hex(' ')}{NL}")
+            t.insert("end", NL)
+
+    def _fill_sip(self, r):
+        """SIP messages, grouped into dialogs by Call-ID.
+
+        Grouping is the only "assembly" claimed here. There is no Bearer
+        Connection reassembly, so a dialog is the messages that carried the
+        same Call-ID and survived, in wire order -- not a complete call.
+        Anything missing is missing silently, so read a short dialog as
+        "this is what got through", never as "this is what happened".
+        """
+        t = self.tab_sip
+        msgs, dls = sip.scan(r.payload)
+        r.sip_messages, r.sip_dialogs = msgs, dls
+        if not msgs:
+            t.insert("end", "No SIP found." + NL*2
+                     + "SIP is text, so it only appears where the traffic is "
+                       "not inside TLS -- signalling to a gateway, typically. "
+                       "It also needs a long enough decode: the 1534.499 "
+                       "capture shows nothing in its first 30 s and five "
+                       "messages over the full 224 s." + NL)
+            return
+
+        dmg = sum(1 for m in msgs if m.damaged)
+        cut = sum(1 for m in msgs if m.check != "intact")
+        t.insert("end", f"{len(msgs)} message(s) in {len(dls)} dialog(s)"
+                        + (f", {cut} truncated" if cut else "")
+                        + (f", {dmg} with a lost first byte" if dmg else "")
+                        + NL)
+        t.insert("end", "Grouped by Call-ID in wire order. Authorization and "
+                        "WWW-Authenticate values are redacted." + NL*2)
+
+        for d in dls:
+            t.insert("end", f"CALL-ID {d.call_id or '(none recovered)'}{NL}")
+            t.insert("end", f"   {d.from_uri}  ->  {d.to_uri}{NL}")
+            t.insert("end", f"   {d.outcome}"
+                            + (f"   methods: {', '.join(d.methods)}"
+                               if d.methods else "")
+                            + f"   ({len(d.messages)} message(s)){NL}")
+            for md in d.media:
+                t.insert("end", f"   media: {md.kind} {md.address}:{md.port} "
+                                f"{md.proto}  {', '.join(md.formats)}{NL}")
+            for m in d.messages:
+                flags = [] if m.check == "intact" else [m.check]
+                if m.damaged:
+                    flags.append("lost 1st byte")
+                t.insert("end", f"   @{m.offset}  {m.summary}"
+                                + (f"   [{', '.join(flags)}]" if flags else "")
+                                + NL)
+                for k, v in m.headers:
+                    t.insert("end", f"        {k}: {v}{NL}")
+                if m.body:
+                    for line in m.body.decode("utf-8", "replace"
+                                              ).splitlines()[:12]:
+                        t.insert("end", f"        | {line[:150]}{NL}")
             t.insert("end", NL)
 
     def _exp_files(self):

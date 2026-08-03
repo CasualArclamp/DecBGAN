@@ -26,6 +26,7 @@ Submodules, roughly bottom-up:
     bulletin  BulletinBoard SDU and AVP list walking (3-1 clause 5.4.3)
     pcapout   pcap writers and IPv4 carving
     findings  certificates, DNS, HTTP and TLS carved from a payload
+    sip       SIP messages carved from a payload, grouped into dialogs
     tx        reference transmitter, used to validate the receiver
     update    version check against the published VERSION file (opt-out)
 
@@ -56,5 +57,5 @@ __version__ = _read_version()
 
 __all__ = [
     "annex", "bctpdu", "bctrl", "bulletin", "carrier", "decoder", "mod", "pcapout",
-    "findings", "pipeline", "recv", "spec", "turbo", "tx", "update",
+    "findings", "pipeline", "recv", "sip", "spec", "turbo", "tx", "update",
 ]
