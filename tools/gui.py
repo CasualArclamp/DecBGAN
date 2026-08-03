@@ -368,29 +368,27 @@ class App(tk.Tk):
                     troughcolor="#262b33", borderwidth=0)
 
     def _build(self):
-        top = ttk.Frame(self, padding=8)
+        top = ttk.Frame(self, padding=6)
         top.pack(fill="x")
         self.pathvar = tk.StringVar()
         ttk.Label(top, text="Capture").pack(side="left")
-        ttk.Entry(top, textvariable=self.pathvar, width=70).pack(
-            side="left", padx=6)
-        ttk.Button(top, text="Browse", command=self._browse).pack(side="left")
-        ttk.Label(top, text="  seconds").pack(side="left")
+        ttk.Entry(top, textvariable=self.pathvar, width=55).pack(
+            side="left", padx=4)
+        ttk.Button(top, text="Browse", command=self._browse).pack(side="left", padx=2)
+        ttk.Label(top, text="secs").pack(side="left", padx=(6, 0))
         self.secsvar = tk.StringVar(value="20")
-        ttk.Entry(top, textvariable=self.secsvar, width=6).pack(side="left")
+        ttk.Entry(top, textvariable=self.secsvar, width=5).pack(side="left")
         ttk.Button(top, text="Max", command=self._use_max,
-                   width=5).pack(side="left", padx=(2, 0))
+                   width=4).pack(side="left", padx=2)
         self.searchvar = tk.BooleanVar(value=True)
-        ttk.Checkbutton(top, text="search levels (10x slower, needed for "
-                                  "blocks 1-7)",
+        ttk.Checkbutton(top, text="search levels (slower, for blocks 1-7)",
                         variable=self.searchvar,
                         command=lambda: self._probe_path()).pack(
-                            side="left", padx=8)
-        ttk.Button(top, text="Scan",
-                   command=self._scan).pack(side="left", padx=(4, 0))
+                            side="left", padx=6)
+        ttk.Button(top, text="Scan", command=self._scan).pack(side="left", padx=2)
         self.btn = ttk.Button(top, text="Decode", command=self._start)
-        self.btn.pack(side="left", padx=4)
-        ttk.Button(top, text="Stop", command=self.stop.set).pack(side="left")
+        self.btn.pack(side="left", padx=2)
+        ttk.Button(top, text="Stop", command=self.stop.set).pack(side="left", padx=2)
 
         # capture summary, refreshed whenever the path changes
         cap = ttk.Frame(self, padding=(8, 0, 8, 4))
