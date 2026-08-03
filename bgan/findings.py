@@ -22,6 +22,7 @@ fragments.
 from __future__ import annotations
 
 import re
+import zlib
 from dataclasses import dataclass, field
 
 
@@ -400,6 +401,190 @@ def http_messages(blob):
                                head.decode("ascii", "replace"),
                                _headers(blob, line_end + 2)))
     return out
+
+
+# --- HTTP bodies, i.e. documents --------------------------------------------
+
+_EXT = {"text/html": ".html", "text/plain": ".txt", "text/css": ".css",
+        "application/json": ".json", "text/x-json": ".json",
+        "application/javascript": ".js", "text/javascript": ".js",
+        "application/xml": ".xml", "text/xml": ".xml",
+        "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+        "image/svg+xml": ".svg", "application/pkix-crl": ".crl",
+        "application/pkix-cert": ".cer", "application/ocsp-response": ".ors",
+        "application/octet-stream": ".bin"}
+
+
+@dataclass
+class Document:
+    offset: int
+    status: str
+    ctype: str
+    declared: int          # Content-Length, or -1 when chunked/unknown
+    data: bytes
+    note: str = ""
+
+    @property
+    def name(self):
+        base = _EXT.get(self.ctype.split(";")[0].strip().lower(), ".bin")
+        return f"doc_{self.offset:08d}{base}"
+
+    @property
+    def intact(self):
+        """Does the body look like an uninterrupted run of its own type?
+
+        There is no way to *prove* the bytes after a header belong to that
+        response -- the payload is FEC blocks concatenated with no
+        reassembly, so the next block may be someone else's traffic. What can
+        be checked is self-consistency: a text body that is entirely
+        printable, or a compressed body that inflates, almost certainly is
+        the real thing. A text body that turns to binary partway is the
+        signature of the response being cut off by an unrelated block.
+        """
+        if not self.data:
+            return False
+        if self.ctype.startswith(("text/", "application/json",
+                                  "application/xml", "text/x-json")):
+            ok = sum(1 for c in self.data if 0x09 <= c <= 0x7e or c in (0x0a, 0x0d))
+            return ok/len(self.data) > 0.98
+        return True
+
+
+def _inflate(data, wbits):
+    """Decompress as much as possible, tolerating a truncated tail."""
+    d = zlib.decompressobj(wbits)
+    out = bytearray()
+    try:
+        for k in range(0, len(data), 512):
+            out += d.decompress(data[k:k + 512])
+    except zlib.error:
+        pass
+    return bytes(out)
+
+
+def _dechunk(blob, i, limit):
+    """Transfer-Encoding: chunked. Stops at the first malformed size line."""
+    out = bytearray()
+    end = min(len(blob), i + limit)
+    while i < end:
+        nl = blob.find(b"\r\n", i, min(end, i + 20))
+        if nl < 0:
+            break
+        try:
+            n = int(blob[i:nl].split(b";")[0], 16)
+        except ValueError:
+            break
+        if n == 0:
+            break
+        if nl + 2 + n > end:
+            out += blob[nl + 2:end]         # truncated final chunk
+            break
+        out += blob[nl + 2:nl + 2 + n]
+        i = nl + 2 + n + 2
+    return bytes(out)
+
+
+def http_bodies(blob, max_body=1 << 20):
+    """HTTP response bodies, decompressed where the headers say to.
+
+    Delimited by Content-Length or by chunk framing -- a response with
+    neither cannot be bounded and is skipped rather than guessed at.
+
+    Whether the bytes after a header really are that response's body cannot
+    be established from this payload: there is no Bearer Connection
+    reassembly, so the following block may belong to a different flow. Use
+    Document.intact, which checks the body against its own declared type.
+    """
+    out = []
+    for m in re.finditer(rb"HTTP/1\.[01] (\d{3})([^\r\n]{0,80})\r\n", blob):
+        hs = m.end()
+        he = blob.find(b"\r\n\r\n", hs, hs + 4096)
+        if he < 0:
+            continue
+        try:
+            hdrs = blob[hs:he].decode("ascii", "replace")
+        except Exception:
+            continue
+
+        def hv(name, h=hdrs):
+            g = re.search(rf"^{name}:\s*([^\r\n]*)", h, re.I | re.M)
+            return g.group(1).strip() if g else ""
+
+        ctype = hv("Content-Type") or "application/octet-stream"
+        enc = hv("Content-Encoding").lower()
+        te = hv("Transfer-Encoding").lower()
+        cl = hv("Content-Length")
+        body, declared, note = b"", -1, ""
+
+        if "chunked" in te:
+            body = _dechunk(blob, he + 4, max_body)
+            note = "chunked"
+        elif cl.isdigit():
+            declared = int(cl)
+            if declared == 0 or declared > max_body:
+                continue
+            body = blob[he + 4:he + 4 + declared]
+            if len(body) < declared:
+                note = f"truncated, {len(body)} of {declared}"
+        else:
+            continue                        # no way to bound the body
+
+        if not body:
+            continue
+        if enc in ("gzip", "x-gzip"):
+            raw, body = body, _inflate(body, 16 + zlib.MAX_WBITS)
+            note = (note + "; " if note else "") + (
+                f"gunzipped {len(raw)}->{len(body)}" if body
+                else "gzip did not inflate")
+        elif enc == "deflate":
+            raw, body = body, (_inflate(body, zlib.MAX_WBITS)
+                               or _inflate(body, -zlib.MAX_WBITS))
+            note = (note + "; " if note else "") + (
+                f"inflated {len(raw)}->{len(body)}" if body
+                else "deflate did not inflate")
+        elif enc == "br":
+            note = (note + "; " if note else "") + "brotli, not decoded"
+        if not body:
+            continue
+        out.append(Document(m.start(),
+                            f"{m.group(1).decode()}{m.group(2).decode('ascii','replace')}".strip(),
+                            ctype, declared, body, note))
+    return out
+
+
+_MARKUP = re.compile(
+    rb"<!DOCTYPE\s+html|<html[\s>]|<\?xml[\s?]|<svg[\s>]|<rss[\s>]", re.I)
+
+
+def markup_fragments(blob, span=4096):
+    """Markup found without a usable HTTP header in front of it.
+
+    A response whose header block failed to decode still leaves its body in
+    the payload. These are fragments by definition -- the run is cut at the
+    first non-text byte -- so they are reported separately from bodies with
+    a Content-Length behind them.
+    """
+    out = []
+    for m in _MARKUP.finditer(blob):
+        i = m.start()
+        j = i
+        end = min(len(blob), i + span)
+        while j < end and (0x09 <= blob[j] <= 0x7e or blob[j] in (0x0a, 0x0d)):
+            j += 1
+        if j - i < 64:
+            continue
+        out.append(Document(i, "no header", "text/html", -1, blob[i:j],
+                            "fragment, no Content-Length"))
+    return out
+
+
+def documents(blob):
+    """Everything reconstructable as a file, bodies first then fragments."""
+    docs = http_bodies(blob)
+    spans = [(d.offset, d.offset + len(d.data) + 4096) for d in docs]
+    frags = [f for f in markup_fragments(blob)
+             if not any(a <= f.offset < b for a, b in spans)]
+    return sorted(docs + frags, key=lambda d: d.offset)
 
 
 # --- TLS --------------------------------------------------------------------
