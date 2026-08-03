@@ -181,6 +181,27 @@ Recorded with an RTL-SDR v4 and an L-band patch antenna, via SDR++:
 - **Format** 16-bit stereo WAV (SDR++ baseband recording)
 - BGAN forward carriers sit around 1518–1559 MHz
 
+### Updates
+
+The GUI checks once at startup whether a newer version has been published,
+and asks before doing anything about it. The check fetches one short text
+file — [`VERSION`](VERSION) — and compares it with the local copy. **No code
+is downloaded by the check**, so a wrong or hostile answer can at worst
+produce a spurious prompt.
+
+Saying yes runs `git pull --ff-only` in this checkout. `--ff-only` cannot
+create a merge commit or discard local commits, and a dirty working tree is
+refused outright, so your own work is never overwritten — you get told to
+commit or stash instead.
+
+```bash
+python -m bgan.update
+```
+
+is the same check from the command line. Set `BGAN_NO_UPDATE_CHECK=1` to turn
+it off; `bgan/update.py` is the only thing in the project that touches the
+network.
+
 ---
 
 ## Validation

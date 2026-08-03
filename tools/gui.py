@@ -35,7 +35,8 @@ from matplotlib.backends.backend_tkagg import (                # noqa: E402
     FigureCanvasTkAgg)
 from scipy.signal import welch                                # noqa: E402
 
-from bgan import spec, mod, recv, bulletin, pcapout, findings  # noqa: E402
+from bgan import (spec, mod, recv, bulletin, pcapout,          # noqa: E402
+                  findings, update)
 from tools.decode_wav import (decode_capture, survey, NoCarrier,  # noqa: E402
                               channelise, safe_stem, MOS)
 
@@ -300,7 +301,7 @@ def _band(f, p, centre, bearer=None):
 class App(tk.Tk):
     def __init__(self, initial=None):
         super().__init__()
-        self.title("BGAN forward-link decoder")
+        self.title(f"BGAN forward-link decoder {update.local_version()}")
         self.geometry("1280x900")
         self.configure(bg=BG)
         self.q = queue.Queue()
@@ -312,6 +313,42 @@ class App(tk.Tk):
         if initial:
             self.pathvar.set(initial)
         self.after(80, self._poll)
+        self._check_update()
+
+    def _check_update(self):
+        """Ask GitHub for the published version, off the UI thread.
+
+        Fires once at startup and stays quiet unless there is something to
+        say: no dialog when up to date, offline, or opted out via
+        BGAN_NO_UPDATE_CHECK. bgan.update.check() swallows its own errors,
+        so a failed lookup costs nothing.
+        """
+        def run():
+            st = update.check()
+            if st and st["newer"]:
+                self.q.put(("update", st))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _offer_update(self, st):
+        head = (f"Version {st['remote']} is available.\n"
+                f"You have {st['local']}.\n\n")
+        ok, why = update.can_update()
+        if not ok:
+            messagebox.showinfo("Update available",
+                                head + "Cannot update automatically:\n" + why)
+            return
+        if not messagebox.askyesno(
+                "Update available",
+                head + "Fetch it now? This runs `git pull --ff-only` in this\n"
+                "checkout, which cannot discard local commits."):
+            return
+        done, out = update.apply_update()
+        self._log("update: " + out)
+        if done:
+            messagebox.showinfo(
+                "Updated", out + "\n\nRestart the app to load it.")
+        else:
+            messagebox.showerror("Update failed", out)
 
     def _style(self):
         s = ttk.Style(self)
@@ -666,6 +703,8 @@ class App(tk.Tk):
                       f"symbols")
         elif kind == "nocarrier":
             self._no_carrier(kw["rows"], kw["path"])
+        elif kind == "update":
+            self._offer_update(kw)
         elif kind == "error":
             self._log(kw["text"])
             self.statvar.set("error - see Log tab")
