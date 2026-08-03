@@ -111,7 +111,7 @@ class Worker(threading.Thread):
         r.info = dict(info)
         r.info["path"] = self.path
         r.info["file_hz"] = _freq_from_name(self.path)
-        r.info["occ_bw"] = _occupied_bw(fr[i], P[i])
+        r.info["band"] = _band(fr[i], P[i], info.get("centre", 0.0))
         r.offs, r.lvls, r.mets = offs, lvls, mets
         r.recs = [(f, b, lv, ag, bits) for f, b, lv, ag, bits in recs]
         r.const = info.get("const", np.zeros(0, complex))
@@ -192,16 +192,54 @@ def _hms(s):
     return f"{s//3600}h{(s % 3600)//60:02d}m"
 
 
-def _occupied_bw(f, p, frac=0.99):
-    """99% power bandwidth, in Hz."""
-    p = np.maximum(p - np.median(np.sort(p)[:len(p)//5]), 0)
-    c = np.cumsum(p)
-    if c[-1] <= 0:
-        return float("nan")
-    c = c/c[-1]
-    lo = f[np.searchsorted(c, (1 - frac)/2)]
-    hi = f[np.searchsorted(c, 1 - (1 - frac)/2)]
-    return float(hi - lo)
+def _band(f, p, centre, bearer=None):
+    """Where the bearer sits, plus a check that `centre` is right.
+
+    The bandwidth is NOT measured. Roll-off is a spec constant (alpha 0.25,
+    2-1 clause 5.2.3), so the occupied band follows from the symbol rate and
+    the only unknown is the centre -- which the decoder has already found.
+
+    Measuring it instead made the figure track the NOISE, not the signal. A
+    99%-of-total-power rule applied to a whole capture integrates every noise
+    bin and every other carrier in the recording, and `np.maximum(p - floor,
+    0)` half-wave rectifies a chi-squared periodogram so the residue
+    accumulates with the bin count rather than cancelling. Measured:
+
+        same synthetic bearer   166.7 kHz @ 30 dB   398.2 kHz @ 4 dB
+        BGAN1, 189 kHz signal   1924 kHz reported in a 2048 kHz capture
+        192 kHz captures        pinned at ~162 kHz -- the capture width
+
+    i.e. it returned about 94% of whatever span was recorded whenever SNR
+    was modest, and was only accidentally near-right on the cleanest files.
+
+    What IS worth measuring is whether the centre is right, so return the
+    power imbalance between the halves of the allocation. Zero dB means
+    centred; a lopsided spectrum is exactly what biased the old centroid
+    estimator (see bgan/carrier.py). Measured: synthetics -0.01..+0.05 dB,
+    512 kHz captures +0.15..+0.33, and +8.5 dB on the one file holding no
+    F80T4.5X-8B carrier at all.
+
+    The 192 kHz captures all sit near +1 dB, and that is not distortion --
+    their carriers land 8-9 kHz low, so the allocation runs past the lower
+    capture edge and the missing power shows up as upper-half bias. `clipped`
+    reports that condition directly rather than leaving it to be read out of
+    the imbalance.
+    """
+    b = bearer or spec.F80T45X8B
+    alloc = b.alloc_bw
+    if f is None:                       # no PSD to hand -- spec figures only
+        return dict(alloc=alloc, p99=b.power_bw(0.99), clipped=0.0,
+                    balance=float("nan"))
+    d = f - centre
+    ring = (np.abs(d) > alloc*0.55) & (np.abs(d) <= alloc*0.8)
+    q = p - (np.median(p[ring]) if ring.sum() >= 32 else 0.0)
+    lo = float(q[(d >= -alloc/2) & (d < 0)].sum())
+    hi = float(q[(d >= 0) & (d <= alloc/2)].sum())
+    span = float(f[-1] - f[0])
+    return dict(alloc=alloc, p99=b.power_bw(0.99),
+                clipped=max(0.0, alloc/2 + abs(centre) - span/2),
+                balance=10*np.log10(hi/lo) if lo > 0 and hi > 0
+                else float("nan"))
 
 
 # --------------------------------------------------------------------------
@@ -411,7 +449,7 @@ class App(tk.Tk):
         ])
         self._show_info({**info, "path": p,
                          "file_hz": _freq_from_name(p),
-                         "occ_bw": float("nan")}, extra)
+                         "band": _band(None, None, 0.0)}, extra)
 
     def _no_carrier(self, rows, path):
         """Explain a capture with no F80T4.5X-8B carrier, rather than failing.
@@ -451,7 +489,7 @@ class App(tk.Tk):
         self.tab_log.see("end")
         self._show_info(
             {"path": path, "file_hz": _freq_from_name(path), "secs": 0.0,
-             "raw_sr": 0, "centre": 0.0, "occ_bw": float("nan"), "rs": 0.0,
+             "raw_sr": 0, "centre": 0.0, "rs": 0.0,
              "ppm": 0.0, "nframes": 0, "m4": float("nan"),
              "esn0": float("nan")},
             NL + NL + "NO USABLE CARRIER" + NL
@@ -595,7 +633,25 @@ class App(tk.Tk):
             f"  capture         {i['secs']:.1f} s @ {i['raw_sr']/1e3:.0f} kHz",
             f"  centre          {cen}",
             f"  carrier offset  {i['centre']:+.1f} Hz",
-            f"  occupied BW     {i['occ_bw']/1e3:.1f} kHz (99% power)",
+        ]
+        b = i.get("band")
+        if b:
+            if hz:
+                lo = (hz + i['centre'] - b['alloc']/2)/1e6
+                txt.append(f"  occupied band   {lo:.4f} - "
+                           f"{lo + b['alloc']/1e6:.4f} MHz")
+            txt.append(
+                f"  occupied BW     {b['alloc']/1e3:.1f} kHz allocated, "
+                f"{b['p99']/1e3:.1f} kHz 99% power")
+            txt.append(f"                  (alpha {spec.ROLLOFF}, from spec -- "
+                       f"not measured)")
+            if np.isfinite(b["balance"]):
+                txt.append(f"  band symmetry   {b['balance']:+.2f} dB "
+                           f"upper/lower  (0 = centred)")
+            if b.get("clipped", 0) > 0:
+                txt.append(f"  ** {b['clipped']/1e3:.1f} kHz of the allocation "
+                           f"falls outside the capture")
+        txt += [
             "",
             "BEARER",
             "  type            F80T4.5X-8B (16-QAM)",

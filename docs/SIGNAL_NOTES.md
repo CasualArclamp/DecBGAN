@@ -140,6 +140,40 @@ near-identical to synthetic generated at Es/N0 9.8 dB.
 bearer uses it), and a 12096-symbol frame period is exactly 80 ms at that rate.
 Both agree with the bearer identification.
 
+### Do not measure the occupied bandwidth
+
+Roll-off is a spec constant (alpha 0.25, 2-1 clause 5.2.3), so the band is
+fixed once the centre is known: **189.0 kHz allocated, 166.8 kHz for 99% of
+the power** (`spec.Bearer.alloc_bw` / `power_bw`, closed form, agreeing with
+numeric integration of |H(f)|^2 to 0.0 Hz).
+
+The GUI used to estimate it instead, with a 99%-of-total-power rule over the
+whole capture. That measures the noise, not the signal, for three compounding
+reasons: it integrates every noise bin and every other carrier in the
+recording; `np.maximum(p - floor, 0)` half-wave rectifies a chi-squared
+periodogram so noise residue accumulates with the bin count instead of
+cancelling; and the floor was the median of the lowest 20% of bins, roughly
+the 10th percentile, which sits below the true floor. The result tracked the
+recorded span rather than the bearer:
+
+| capture | reported | actual |
+|---|---|---|
+| synthetic L3 @ 30 dB, 512 kHz | 166.7 kHz | 166.8 kHz |
+| **same synthetic @ 4 dB** | **398.2 kHz** | 166.8 kHz |
+| 1547.500, 512 kHz | 429.2 kHz | 166.8 kHz |
+| BGAN1, 2048 kHz | **1924 kHz** | 166.8 kHz |
+| BGAN9, 192 kHz | 162.0 kHz | 166.8 kHz |
+
+i.e. about 94% of whatever span was recorded whenever SNR was modest, right
+only by accident on the cleanest files, and *under* the truth on the 192 kHz
+captures because the recording is narrower than the answer.
+
+What is worth measuring is the centre, so the panel now reports the power
+imbalance between the halves of the allocation instead. It works: on BGAN15
+the raw `find_carriers` candidate (-9.2 kHz) reads +0.95 dB while the
+decoder's refined centre (-301 Hz) reads +0.04 dB, and the one capture with
+no F80T4.5X-8B carrier at all reads +8.5 dB.
+
 ## The blocker
 
 **No UW or pilot amplitude structure is present.** Table 5.10 plus Figure 5.17
