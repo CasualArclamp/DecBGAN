@@ -308,6 +308,7 @@ class App(tk.Tk):
         self.stop = threading.Event()
         self.worker = None
         self.result = None
+        self._upd_busy = False
         self._style()
         self._build()
         if initial:
@@ -315,40 +316,114 @@ class App(tk.Tk):
         self.after(80, self._poll)
         self._check_update()
 
-    def _check_update(self):
+    # -- update control --------------------------------------------------
+    #
+    # The version and one button, top-left. The button carries the state:
+    #   "Check updates"      idle
+    #   "Checking..."        a lookup is in flight, disabled
+    #   "Update to 0.5.0"    something newer exists -- green, and clicking it
+    #                        pulls and then closes the app
+    #
+    # The startup check drives the button and never opens a dialog. A modal on
+    # every launch would be the wrong trade for a background nicety, and there
+    # is now a visible control saying the same thing.
+
+    def _check_update(self, announce=False):
         """Ask GitHub for the published version, off the UI thread.
 
-        Fires once at startup and stays quiet unless there is something to
-        say: no dialog when up to date, offline, or opted out via
-        BGAN_NO_UPDATE_CHECK. bgan.update.check() swallows its own errors,
-        so a failed lookup costs nothing.
+        `announce` is set when the user pressed the button, and is the only
+        case that reports "you are up to date" or a failure -- an automatic
+        check that finds nothing should say nothing. bgan.update.check()
+        swallows its own errors, so a failed lookup costs nothing.
         """
+        if self._upd_busy:
+            return
+        self._upd_busy = True
+        self.updbtn.configure(text="Checking...", state="disabled")
+
         def run():
             st = update.check()
-            if st and st["newer"]:
-                self.q.put(("update", st))
+            self.q.put(("updchecked", {"st": st, "announce": announce}))
         threading.Thread(target=run, daemon=True).start()
 
-    def _offer_update(self, st):
-        head = (f"Version {st['remote']} is available.\n"
-                f"You have {st['local']}.\n\n")
+    def _update_checked(self, st, announce):
+        self._upd_busy = False
+        if st and st["newer"]:
+            self.updbtn.configure(text=f"Update to {st['remote']}",
+                                  state="normal", style="Update.TButton",
+                                  command=lambda: self._do_update(st))
+            self._log(f"update available: {st['local']} -> {st['remote']}")
+            return
+        self.updbtn.configure(text="Check updates", state="normal",
+                              style="TButton",
+                              command=lambda: self._check_update(True))
+        if not announce:
+            return
+        if st is None:
+            # Distinguish the cases: check() folds them all into None, which
+            # is right for a background check and unhelpful to someone who
+            # just pressed the button.
+            if os.environ.get("BGAN_NO_UPDATE_CHECK"):
+                messagebox.showinfo(
+                    "Update check disabled",
+                    "BGAN_NO_UPDATE_CHECK is set, so nothing was requested.\n\n"
+                    f"You are running {update.local_version()}.")
+            else:
+                messagebox.showinfo(
+                    "Update check",
+                    "Could not reach GitHub -- offline, or blocked by a "
+                    f"proxy.\n\nYou are running {update.local_version()}.")
+        else:
+            messagebox.showinfo(
+                "Up to date", f"You are running {st['local']}, "
+                              "which is the published version.")
+
+    def _do_update(self, st):
+        """Pull, then close. Confirmed first, and the pull happens off-thread.
+
+        The pull runs BEFORE closing, not after: if it fails there is still a
+        window to say so, and the app stays open. Closing first and updating
+        from a detached helper would hide exactly the failure worth seeing.
+        """
         ok, why = update.can_update()
         if not ok:
-            messagebox.showinfo("Update available",
-                                head + "Cannot update automatically:\n" + why)
+            messagebox.showwarning(
+                "Cannot update automatically",
+                f"Version {st['remote']} is available, but this copy cannot "
+                f"update itself:\n\n{why}")
             return
         if not messagebox.askyesno(
-                "Update available",
-                head + "Fetch it now? This runs `git pull --ff-only` in this\n"
-                "checkout, which cannot discard local commits."):
+                "Update and close",
+                f"Update from {st['local']} to {st['remote']}?\n\n"
+                "This runs `git pull --ff-only` in this checkout, which "
+                "cannot discard local commits, and then closes the app.\n\n"
+                "Any decode in progress will be stopped."):
             return
-        done, out = update.apply_update()
+        self._upd_busy = True
+        self.updbtn.configure(text="Updating...", state="disabled")
+        self.statvar.set("updating...")
+        self.stop.set()                 # stop any decode before files move
+
+        def run():
+            done, out = update.apply_update()
+            self.q.put(("updapplied", {"done": done, "out": out, "st": st}))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _update_applied(self, done, out, st):
+        self._upd_busy = False
         self._log("update: " + out)
-        if done:
-            messagebox.showinfo(
-                "Updated", out + "\n\nRestart the app to load it.")
-        else:
+        if not done:
+            self.statvar.set("update failed - see Log tab")
+            self.updbtn.configure(text=f"Update to {st['remote']}",
+                                  state="normal", style="Update.TButton",
+                                  command=lambda: self._do_update(st))
             messagebox.showerror("Update failed", out)
+            return
+        messagebox.showinfo(
+            "Updated",
+            f"Now at {st['remote']}.\n\n{out}\n\n"
+            "The app will close. Start it again to run the new version.")
+        self.destroy()
 
     def _style(self):
         s = ttk.Style(self)
@@ -366,10 +441,25 @@ class App(tk.Tk):
         s.map("TButton", background=[("active", "#4a5566")])
         s.configure("Horizontal.TProgressbar", background=ACC,
                     troughcolor="#262b33", borderwidth=0)
+        # The update button only wears this once there is something to install,
+        # so green here means "an action is waiting", not merely "all well".
+        s.configure("Update.TButton", background=GOOD, foreground="#11141a")
+        s.map("Update.TButton", background=[("active", "#a5d183")])
 
     def _build(self):
         top = ttk.Frame(self, padding=6)
         top.pack(fill="x")
+
+        # Version and the update control, top-left. Compact, because this row
+        # is already busy and the capture path deserves the width.
+        ttk.Label(top, text=f"v{update.local_version()}",
+                  foreground=ACC).pack(side="left")
+        self.updbtn = ttk.Button(top, text="Check updates", width=14,
+                                 command=lambda: self._check_update(True))
+        self.updbtn.pack(side="left", padx=(6, 8))
+        ttk.Separator(top, orient="vertical").pack(side="left", fill="y",
+                                                   padx=(0, 8))
+
         self.pathvar = tk.StringVar()
         ttk.Label(top, text="Capture").pack(side="left")
         ttk.Entry(top, textvariable=self.pathvar, width=55).pack(
@@ -721,8 +811,10 @@ class App(tk.Tk):
                       f"symbols")
         elif kind == "nocarrier":
             self._no_carrier(kw["rows"], kw["path"])
-        elif kind == "update":
-            self._offer_update(kw)
+        elif kind == "updchecked":
+            self._update_checked(kw["st"], kw["announce"])
+        elif kind == "updapplied":
+            self._update_applied(kw["done"], kw["out"], kw["st"])
         elif kind == "error":
             self._log(kw["text"])
             self.statvar.set("error - see Log tab")

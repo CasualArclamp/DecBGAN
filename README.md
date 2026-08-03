@@ -183,16 +183,21 @@ Recorded with an RTL-SDR v4 and an L-band patch antenna, via SDR++:
 
 ### Updates
 
-The GUI checks once at startup whether a newer version has been published,
-and asks before doing anything about it. The check fetches one short text
-file — [`VERSION`](VERSION) — and compares it with the local copy. **No code
-is downloaded by the check**, so a wrong or hostile answer can at worst
-produce a spurious prompt.
+The version sits top-left in the GUI with a **Check updates** button beside
+it. The app also checks once at startup, silently — no dialog. When something
+newer is published the button turns green and becomes **Update to X.Y.Z**;
+pressing it pulls and then closes the app, so the next start runs the new
+code.
 
-Saying yes runs `git pull --ff-only` in this checkout. `--ff-only` cannot
+The check fetches one short text file — [`VERSION`](VERSION) — and compares
+it with the local copy. **No code is downloaded by the check**, so a wrong or
+hostile answer can at worst produce a spurious prompt.
+
+Updating runs `git pull --ff-only` in this checkout. `--ff-only` cannot
 create a merge commit or discard local commits, and a dirty working tree is
 refused outright, so your own work is never overwritten — you get told to
-commit or stash instead.
+commit or stash instead. The pull happens *before* the app closes: if it
+fails you get told, and the app stays open.
 
 ```bash
 python -m bgan.update
