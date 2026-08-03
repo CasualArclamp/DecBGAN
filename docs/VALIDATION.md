@@ -712,3 +712,101 @@ the certificate chains already recovered.
 Note its offset, -530.8 Hz, is just *inside* the 552 Hz pilot-unwrap cliff.
 So BGAN15 needed the floor fix to be found at all; the carrier correction then
 took its unique-word EVM from 0.314 to 0.168.
+
+---
+
+## Carved findings: certificates, DNS, HTTP, TLS (Aug 2026)
+
+`bgan/findings.py` recognises structured artefacts in a decoded payload. The
+standard applied is the one `pcapout.carve_ipv4` set: scanning a megabyte for
+a two-byte tag finds a hit every few hundred bytes in noise, so a candidate is
+accepted only if it **parses to its own declared length and ends exactly where
+it said it would**.
+
+    extractor    validation
+    cert         DER SEQUENCE with exactly three children (tbsCertificate,
+                 signatureAlgorithm SEQUENCE, signatureValue BIT STRING),
+                 each parsing to its declared length and together consuming
+                 the outer SEQUENCE to the byte; TBS must hold a serial
+                 INTEGER and a validity SEQUENCE of two time values
+    cert frag    a SEQUENCE holding exactly two UTCTime/GeneralizedTime
+                 values, all digits and Z-terminated, notAfter > notBefore
+    dns          QDCOUNT 1, opcode QUERY, reserved Z bits zero, RCODE <= 10,
+                 section counts <= 64, question name parses to valid labels
+                 totalling <= 253 with QCLASS IN and a known QTYPE
+    tls          record 0x16, version 0x03xx, handshake type 1 or 2, and the
+                 24-bit handshake length + 4 equal to the 16-bit record
+                 length exactly
+    http         the 7-byte literal `HTTP/1.` plus a start-line grammar match
+    url          plain regex -- the one loose extractor, labelled as such
+
+False accepts over three independent 8 MB blocks of random bytes: **zero**, of
+every kind including URLs. Throughput is 9.6 MB/s, so the scan is free
+relative to a decode.
+
+### Certificates mostly do not parse whole, and that is expected
+
+Only four certificates parse end to end across the captures on hand; the rest
+are recovered from their validity block. This is not a defect in the parser.
+The payload is FEC blocks concatenated in frame/block order with **no Bearer
+Connection reassembly**, so a 1.5 kB certificate is interleaved with whatever
+else the terminal was carrying and its DER lengths stop lining up. Objects
+small enough to sit inside a single block -- a DNS message, an HTTP header
+block, a ClientHello -- survive intact; larger ones do not.
+
+The fragment anchor exists because `Validity ::= SEQUENCE { notBefore Time,
+notAfter Time }` is a ~32-byte shape with almost no freedom in it, and the
+subject Name follows it immediately. That recovers the two most interesting
+facts about a certificate -- who it is for, and when it was issued -- from a
+fragment that will never parse as a whole.
+
+### What the captures actually contain
+
+`1543.100b`, 25 s, 1.18 MB of payload: 149 findings — 114 DNS messages,
+11 TLS handshakes, 7 HTTP transactions, 3 certificates, 14 URLs. Hostnames
+implicated include `edge.microsoft.com`, `login.microsoftonline.com`,
+`update.eset.com`, `routerpool6.rlb.teamviewer.com`, `config.edge.skype.com`,
+`star-mini.c10r.facebook.com` and `pagead2.googlesyndication.com`, plus a
+`10.0.31.172.in-addr.arpa` PTR lookup that names the terminal's own subnet.
+One certificate reads `C=US, O=Amazon, CN=Amazon Root CA 1`, valid
+2015-05-25 to 2037-12-31.
+
+`BGAN15`, 12 s: `myip.opendns.com` and `mqtt-rpc.victronenergy.com` (A and
+AAAA), a certificate for `*.prod.do.dsp.mp.microsoft.com`, and the
+`application/pkix-crl` responses. The Victron MQTT lookup and the
+`*.iot.us-east-1.amazonaws.com` certificate on the other capture agree with
+each other: this is marine/solar monitoring equipment reporting home.
+
+This is corroboration of the decode as much as it is output. A DNS message
+whose label lengths walk exactly to a terminating zero, followed by QCLASS IN
+and a known QTYPE, is not something a mis-tuned acceptance threshold produces.
+
+### Which captures actually carry findings
+
+Measured over a 20 s decode of each, so the comparison is like for like:
+
+    capture        blocks   payload   findings   /MB   hosts
+    1543.100a       96.8%   0.63 MB      142     227     47
+    1543.100b       96.0%   0.94 MB      104     110     41
+    BGAN10          87.1%   0.59 MB       28      48      7
+    BGAN15          98.6%   0.85 MB       36      42      9
+    BGAN9           91.0%   0.67 MB       13      19      4
+    1547.298        95.1%   0.68 MB        2       3      1
+    1553.500        86.7%   0.44 MB        0       0      0
+
+`1543.100a` is the richest by a factor of two, with 21 certificates in 20 s
+against 3 for the capture actually named "lots of data". That is the capture
+which decoded **nothing at all** before Aug 2026.
+
+The two at the bottom are not failures of the extractors, and they agree with
+the content analysis done independently:
+
+  * `1553.500` yields zero findings while decoding 86.7% of its blocks. It is
+    92.8% zero bytes -- an idle bearer sending filler. Nothing to find is the
+    correct answer, and a scanner that returned findings here would be wrong.
+  * `1547.298` yields two from 0.68 MB. It is 0.7% zeros and high entropy,
+    i.e. encrypted bulk traffic with no plaintext handshakes in the window.
+
+Payload size does not predict findings: `1543.100b` decodes half again as many
+bytes as `1543.100a` and finds a third fewer things, because more of its bytes
+are one bulk transfer rather than many small exchanges.

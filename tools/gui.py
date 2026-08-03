@@ -33,7 +33,7 @@ from matplotlib.backends.backend_tkagg import (                # noqa: E402
     FigureCanvasTkAgg)
 from scipy.signal import welch                                # noqa: E402
 
-from bgan import spec, mod, recv, bulletin, pcapout           # noqa: E402
+from bgan import spec, mod, recv, bulletin, pcapout, findings  # noqa: E402
 from tools.decode_wav import (decode_capture, survey, NoCarrier,  # noqa: E402
                               channelise, safe_stem, MOS)
 
@@ -303,6 +303,7 @@ class App(tk.Tk):
 
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.tab_int = self._textpage(nb, "Interesting")
         self.tab_str = self._textpage(nb, "Strings")
         self.tab_bb = self._textpage(nb, "Bearer control")
         self.tab_pkt = self._textpage(nb, "Packets")
@@ -495,7 +496,8 @@ class App(tk.Tk):
                       f"{self.probe['secs']:.1f} s - using the whole file")
             secs = self.probe["secs"]
             self.secsvar.set(f"{secs:.1f}")
-        for t in (self.tab_str, self.tab_bb, self.tab_pkt, self.tab_log):
+        for t in (self.tab_int, self.tab_str, self.tab_bb, self.tab_pkt,
+                  self.tab_log):
             t.delete("1.0", "end")
         self.stop.clear()
         self.result = None
@@ -658,10 +660,62 @@ class App(tk.Tk):
                 extra.append(f"  PLMN            {plmn}")
         self._show_info(r.info, "\n" + "\n".join(x for x in extra if x != ""))
 
+        self._fill_interesting(r)
         self._fill_strings(r)
         self._fill_bb(r)
         self._fill_pkts(r)
         self._log(f"done: {n} blocks, {len(r.payload)} bytes payload")
+
+    def _fill_interesting(self, r):
+        """Recognisable artefacts: certificates, DNS, HTTP, TLS, URLs.
+
+        Leads with the hostnames, because "who was this terminal talking to"
+        is the question the rest of the tab only answers piecemeal.
+        """
+        t = self.tab_int
+        fs = findings.scan(r.payload)
+        by = {}
+        for f in fs:
+            by.setdefault(f.kind, []).append(f)
+        if not fs:
+            t.insert("end", "Nothing recognisable found." + NL*2
+                     + "The extractors need an artefact to sit inside the "
+                       "decoded bytes intact. On a short or lossy decode "
+                       "there may be none." + NL)
+            return
+
+        hosts = findings.hosts(fs)
+        t.insert("end", f"{len(fs)} findings in {len(r.payload)} bytes: "
+                        + ", ".join(f"{len(v)} {k}"
+                                    for k, v in sorted(by.items())) + NL)
+        t.insert("end",
+                 "Carved from decoded blocks, not reassembled: anything "
+                 "spanning a failed block is lost." + NL
+                 + "Certificates rarely parse whole for that reason and are "
+                   "mostly recovered from their validity block." + NL
+                 + "0 false accepts per 8 MB of random bytes, except URLs "
+                   "which are a plain regex." + NL*2)
+
+        if hosts:
+            t.insert("end", f"HOSTS SEEN  ({len(hosts)} distinct){NL}")
+            for h, n in hosts.most_common(60):
+                t.insert("end", f"   {n:3d}  {h}{NL}")
+            if len(hosts) > 60:
+                t.insert("end", f"   ... {len(hosts)-60} more{NL}")
+            t.insert("end", NL)
+
+        titles = dict(cert="CERTIFICATES", dns="DNS", tls="TLS HANDSHAKES",
+                      http="HTTP", url="URLS (regex, expect fragments)")
+        for kind in ("cert", "dns", "tls", "http", "url"):
+            sel = by.get(kind)
+            if not sel:
+                continue
+            t.insert("end", f"{titles[kind]}  ({len(sel)}){NL}")
+            for f in sel:
+                t.insert("end", f"   @{f.offset:8d}  {f.summary}{NL}")
+                for d in f.detail:
+                    t.insert("end", f"                 {d}{NL}")
+            t.insert("end", NL)
 
     def _fill_strings(self, r):
         runs = [(m.start(), m.group()) for m in
