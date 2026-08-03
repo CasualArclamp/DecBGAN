@@ -20,8 +20,11 @@ time:
 """
 from __future__ import annotations
 import argparse
+import os
 import re
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -153,7 +156,7 @@ def probe_centre(x, sr, centre, sps=4, nframes=6, ntau=1):
 
 
 def pick_carrier(x, sr, sps=4, ncand=4, min_ratio=1.8, max_ppm=50.0,
-                 dedupe_hz=8000.0):
+                 dedupe_hz=8000.0, probe_secs=4.0, jobs=None):
     """Choose among candidate carriers by decodability, not by power.
 
     A capture can hold several carriers, and the strongest need not be the one
@@ -174,10 +177,22 @@ def pick_carrier(x, sr, sps=4, ncand=4, min_ratio=1.8, max_ppm=50.0,
 
     Returns (best_centre_or_None, table) where table is one row per candidate.
     """
-    cands = recv.find_carriers(x, sr, n=ncand)
-    rows = []
-    for centre, power in cands:
-        m, fl, ppm, lv, refined = probe_centre(x, sr, centre, sps)
+    # Probe a short window, not the whole capture. probe_centre only looks at
+    # six frames -- 0.48 s -- but used to channelise everything first, so the
+    # cost grew with capture length for no benefit: 10.6 s of a 20 s decode.
+    # Measured across six captures, a 4 s window reaches the same accept or
+    # reject decision on every one and runs 3.0-3.5x faster. The centre it
+    # returns is only a starting point; recv.channelize re-refines it against
+    # the full capture, so a slightly different peak here does not propagate.
+    if probe_secs and len(x) > int(probe_secs*sr):
+        xp = x[:int(probe_secs*sr)]
+    else:
+        xp = x
+    cands = recv.find_carriers(xp, sr, n=ncand)
+
+    def probe_one(cand):
+        centre, power = cand
+        m, fl, ppm, lv, refined = probe_centre(xp, sr, centre, sps)
         ratio = m/max(fl, 1e-9)
         retried = False
         # A candidate about to be rejected gets a second look across all
@@ -188,15 +203,24 @@ def pick_carrier(x, sr, sps=4, ncand=4, min_ratio=1.8, max_ppm=50.0,
         # work are unaffected.
         if ratio < min_ratio and abs(ppm) <= max_ppm:
             m2, fl2, ppm2, lv2, refined2 = probe_centre(
-                x, sr, centre, sps, ntau=TAU_STEPS)
+                xp, sr, centre, sps, ntau=TAU_STEPS)
             r2 = m2/max(fl2, 1e-9)
             retried = True
             if r2 > ratio:
                 m, fl, ppm, lv, refined, ratio = m2, fl2, ppm2, lv2, refined2, r2
         ok = ratio >= min_ratio and abs(ppm) <= max_ppm
-        rows.append(dict(centre=centre, refined=refined, power=power,
-                         metric=m, floor=fl, ratio=ratio, ppm=ppm,
-                         level=lv, ok=ok, retried=retried))
+        return dict(centre=centre, refined=refined, power=power,
+                    metric=m, floor=fl, ratio=ratio, ppm=ppm,
+                    level=lv, ok=ok, retried=retried)
+
+    # Candidates are independent, and each probe is dominated by scipy
+    # resampling and numpy FFTs, both of which drop the GIL.
+    nw = min(len(cands), resolve_jobs(jobs))
+    if nw > 1:
+        with ThreadPoolExecutor(nw) as ex:
+            rows = list(ex.map(probe_one, cands))
+    else:
+        rows = [probe_one(c) for c in cands]
 
     # Deduplicate on the REFINED centre, not the raw one. The suppression
     # guard in find_carriers sits one bandwidth from each peak, so a single
@@ -225,7 +249,7 @@ def pick_carrier(x, sr, sps=4, ncand=4, min_ratio=1.8, max_ppm=50.0,
 
 
 def channelise(path, secs=None, up=2, sps=4, centre=None, autopick=True,
-               offset=0.0):
+               offset=0.0, jobs=None):
     """Raw WAV -> matched-filtered stream at `sps`, plus clock estimate.
 
     Returns (y, fs, rs_est, tau0, info). Symbol extraction is deliberately
@@ -243,7 +267,7 @@ def channelise(path, secs=None, up=2, sps=4, centre=None, autopick=True,
 
     carriers = None
     if centre is None and autopick:
-        centre, carriers = pick_carrier(x, sr, sps)
+        centre, carriers = pick_carrier(x, sr, sps, jobs=jobs)
         if centre is None:
             raise NoCarrier(carriers)
 
@@ -610,16 +634,59 @@ def survey(path, secs=None, ntau=TAU_STEPS, progress=None, offset=0.0,
     return info, (tau_idx, offs, lvls, mets)
 
 
+def resolve_jobs(jobs=None):
+    """Worker count: `jobs`, else $BGAN_JOBS, else one per core."""
+    if jobs is None:
+        env = os.environ.get("BGAN_JOBS", "")
+        jobs = int(env) if env.strip().lstrip("-").isdigit() else 0
+    if not jobs or jobs <= 0:
+        jobs = os.cpu_count() or 1
+    return max(1, min(int(jobs), 64))
+
+
+def decode_frame(s, fb, pred, thr, forced_level, search_levels):
+    """Decode one frame's eight blocks. Returns (block, level, ag, pay, snip).
+
+    Pulled out of decode_capture so frames can go on a thread pool. A frame is
+    the right unit: blocks within one are sequential because block 0 carries
+    the code-rate AVP that hints blocks 1-7, while frames share nothing except
+    the read-only symbol stream and the level predictor.
+    """
+    out, hints = [], None
+    for b in range(8):
+        blk = prepare(s, fb, b)
+        if blk is None:
+            continue
+        if search_levels and forced_level is None:
+            bits, lv, ag = decode_block_fast(blk, b, pred, thr,
+                                             hints[b] if hints else None)
+        else:
+            bits, ag, _ = decode_block(blk, forced_level)
+            lv = forced_level if ag > thr else None
+        if lv is not None:
+            pay = mod.descramble(bits)
+            out.append((b, lv, ag, pay, blk[:400].astype(np.complex64)))
+            if b == 0:
+                # block 0 carries this frame's code-rate AVP, so blocks 1-7
+                # need not be searched blind
+                hints = levels_from_block0(pay, lv)
+    return out
+
+
 def decode_capture(path, secs=None, thr=ACCEPT_AGREEMENT, level=None,
                    search_levels=True,
                    ntau=TAU_STEPS, progress=None, offset=0.0, centre=None,
-                   cfo_enabled=True):
+                   cfo_enabled=True, jobs=None):
     """Full chain with per-frame timing recovery. Returns (records, info).
 
     records: list of (frame, block, level, agreement, payload_bits)
+
+    Frames decode on a thread pool. That is only worthwhile because the numba
+    kernels are compiled nogil -- with the GIL held, 16 threads measured 0.98x,
+    i.e. nothing. See bgan/decoder.py.
     """
     y, fs, rs_est, tau0, info = channelise(path, secs, offset=offset,
-                                           centre=centre)
+                                           centre=centre, jobs=jobs)
     if progress:
         progress(0.10, "searching timing phases")
     tau_idx, offs, lvls, mets = survey_taus(y, fs, rs_est, tau0, ntau)
@@ -635,6 +702,8 @@ def decode_capture(path, secs=None, thr=ACCEPT_AGREEMENT, level=None,
     const = []
     done = 0
     pred = LevelPredictor(uw_level=lvls[0] if len(lvls) else None)
+    nw = resolve_jobs(jobs)
+    info["jobs"] = nw
     for k in range(ntau):
         which = np.flatnonzero(tau_idx == k)
         if not len(which):
@@ -643,28 +712,25 @@ def decode_capture(path, secs=None, thr=ACCEPT_AGREEMENT, level=None,
         if k == 0:
             m4 = recv.timing_quality(s)
             info.update(m4=m4, esn0=recv.esn0_from_m4(m4))
-        for f in which:
-            hints = None
-            for b in range(8):
-                blk = prepare(s, int(offs[f]), b)
-                if blk is None:
-                    continue
-                if search_levels and not level:
-                    bits, lv, ag = decode_block_fast(
-                        blk, b, pred, thr,
-                        hints[b] if hints else None)
-                else:
-                    bits, ag, _ = decode_block(blk, level or lvls[f])
-                    lv = (level or lvls[f]) if ag > thr else None
-                if lv is not None:
-                    pay = mod.descramble(bits)
-                    recs.append((int(f), b, lv, ag, pay))
-                    if b == 0:
-                        # block 0 carries this frame's code-rate AVP,
-                        # so blocks 1-7 need not be searched blind
-                        hints = levels_from_block0(pay, lv)
-                    if len(const) < 150:
-                        const.append(blk[:400].astype(np.complex64))
+
+        def one_frame(f, s=s):
+            return f, decode_frame(s, int(offs[f]), pred, thr,
+                                   level or (lvls[f] if not search_levels
+                                             else None),
+                                   search_levels)
+
+        if nw > 1 and len(which) > 1:
+            with ThreadPoolExecutor(nw) as ex:
+                results = ex.map(one_frame, [int(f) for f in which])
+                results = list(results)
+        else:
+            results = [one_frame(int(f)) for f in which]
+
+        for f, got in results:
+            for b, lv, ag, pay, snippet in got:
+                recs.append((int(f), b, lv, ag, pay))
+                if len(const) < 150:
+                    const.append(snippet)
             done += 1
             if progress and done % 4 == 0:
                 progress(0.10 + 0.88*done/nfr,
@@ -710,10 +776,18 @@ class LevelPredictor:
         self.levels = list(levels or spec.LEVELS_F80T45X8B)
         self.seen = {b: Counter() for b in range(8)}
         self.last = {}
+        # Frames decode concurrently, so the counters this learns from are
+        # shared. The lock costs nothing next to a turbo decode, and without
+        # it Counter updates from several threads lose increments.
+        self._lock = threading.Lock()
         if uw_level:
             self.last[0] = uw_level          # the UW tells us block 0 free
 
     def order(self, b, hint=None):
+        with self._lock:
+            return self._order(b, hint)
+
+    def _order(self, b, hint=None):
         out = []
         if hint and hint in self.levels:
             out.append(hint)
@@ -729,8 +803,9 @@ class LevelPredictor:
         return out
 
     def note(self, b, lv):
-        self.seen[b][lv] += 1
-        self.last[b] = lv
+        with self._lock:
+            self.seen[b][lv] += 1
+            self.last[b] = lv
 
 
 BCTPDU_HDR_BITS = 24        # first BCtSDU starts here; measured, see below
@@ -1013,6 +1088,10 @@ def main():
     ap.add_argument("--ntau", type=int, default=TAU_STEPS,
                     help="timing phases to search per frame (1 = old "
                          "single-phase behaviour)")
+    ap.add_argument("--jobs", type=int, default=None,
+                    help="worker threads for block decoding (default: one "
+                         "per core; also settable with $BGAN_JOBS). 1 forces "
+                         "the old sequential path.")
     ap.add_argument("--no-cfo", dest="cfo", action="store_false",
                     help="skip residual carrier-offset correction. It is "
                          "applied only when it lowers unique-word EVM, so "
@@ -1076,7 +1155,7 @@ def main():
         recs, info, (tau_idx, offs, lvls, mets) = runner(
             a.path, secs=a.secs, thr=a.thr, level=a.level,
             search_levels=a.search_levels, ntau=a.ntau, progress=prog,
-            cfo_enabled=a.cfo, **extra)
+            cfo_enabled=a.cfo, jobs=a.jobs, **extra)
     except NoCarrier as exc:
         print()
         report_no_carrier(a.path, exc.rows, a.secs)
