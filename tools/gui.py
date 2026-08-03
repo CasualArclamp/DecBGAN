@@ -36,7 +36,7 @@ from matplotlib.backends.backend_tkagg import (                # noqa: E402
 from scipy.signal import welch                                # noqa: E402
 
 from bgan import (spec, mod, recv, bulletin, pcapout,          # noqa: E402
-                  findings, sip, update)
+                  findings, sip, rtp, update)
 from tools.decode_wav import (decode_capture, survey, NoCarrier,  # noqa: E402
                               channelise, safe_stem, MOS)
 
@@ -469,6 +469,8 @@ class App(tk.Tk):
                    command=self._exp_bin).pack(side="left")
         ttk.Button(bot, text="Save found files",
                    command=self._exp_files).pack(side="left", padx=6)
+        ttk.Button(bot, text="Save call audio",
+                   command=self._exp_audio).pack(side="left")
         self.expvar = tk.StringVar(value="")
         ttk.Label(bot, textvariable=self.expvar).pack(side="left", padx=10)
 
@@ -481,6 +483,23 @@ class App(tk.Tk):
         t.configure(yscrollcommand=sy.set)
         sy.pack(side="right", fill="y")
         t.pack(fill="both", expand=True)
+        # Semantic colour tags, shared by every text page. Only the SIP tab
+        # uses them today; naming them by role (a status class, a truncation
+        # flag) rather than by colour keeps a tag meaning one thing wherever
+        # it is applied, the same discipline as the info-panel palette.
+        bold = tkfont.Font(font=t["font"])
+        bold.configure(weight="bold")
+        t.tag_configure("head", foreground=ACC, font=bold)
+        t.tag_configure("method", foreground="#b48ead", font=bold)
+        t.tag_configure("uri", foreground=ACC)
+        t.tag_configure("hname", foreground=DIM)
+        t.tag_configure("hval", foreground=VAL)
+        t.tag_configure("ok", foreground="#8fd18a", font=bold)
+        t.tag_configure("prov", foreground="#8fbfd4")
+        t.tag_configure("bad", foreground="#e88388", font=bold)
+        t.tag_configure("flag", foreground="#e8c07d")
+        t.tag_configure("dim", foreground=DIM)
+        t.tag_configure("audio", foreground="#8fd18a", font=bold)
         return t
 
     # -- actions ---------------------------------------------------------
@@ -996,60 +1015,155 @@ class App(tk.Tk):
                     t.insert("end", f"      {body[k:k+32].hex(' ')}{NL}")
             t.insert("end", NL)
 
+    def _status_tag(self, code):
+        """Colour class for a SIP response code: 2xx good, 1xx provisional,
+        4xx/5xx/6xx bad. Matches the outcome phrasing sip.Dialog.outcome uses.
+        """
+        if 200 <= code < 300:
+            return "ok"
+        if 100 <= code < 200:
+            return "prov"
+        return "bad"
+
     def _fill_sip(self, r):
-        """SIP messages, grouped into dialogs by Call-ID.
+        """SIP dialogs, and any RTP audio the same payload carried.
 
         Grouping is the only "assembly" claimed here. There is no Bearer
         Connection reassembly, so a dialog is the messages that carried the
         same Call-ID and survived, in wire order -- not a complete call.
         Anything missing is missing silently, so read a short dialog as
         "this is what got through", never as "this is what happened".
+
+        Colour is by role: request methods, response classes (2xx good, 1xx
+        provisional, else bad), header names vs values, and decoded audio.
         """
         t = self.tab_sip
+
+        def put(text, *tags):
+            t.insert("end", text, tags or ())
+
         msgs, dls = sip.scan(r.payload)
-        r.sip_messages, r.sip_dialogs = msgs, dls
-        if not msgs:
-            t.insert("end", "No SIP found." + NL*2
-                     + "SIP is text, so it only appears where the traffic is "
-                       "not inside TLS -- signalling to a gateway, typically. "
-                       "It also needs a long enough decode: the 1534.499 "
-                       "capture shows nothing in its first 30 s and five "
-                       "messages over the full 224 s." + NL)
+        streams = rtp.streams(r.payload)
+        r.sip_messages, r.sip_dialogs, r.rtp_streams = msgs, dls, streams
+
+        if not msgs and not streams:
+            put("No SIP or RTP found." + NL*2
+                + "SIP is text, so it only appears where the traffic is not "
+                  "inside TLS -- signalling to a gateway, typically -- and "
+                  "RTP audio only exists once a call is actually set up. It "
+                  "also needs a long enough decode: the 1534.499 capture "
+                  "shows nothing in its first 30 s and, over the full 224 s, "
+                  "five OPTIONS keepalives and no media (a keepalive sets up "
+                  "no call, so there is no audio to find)." + NL)
             return
 
+        # --- audio first: it is the thing people came for -------------------
+        self._sip_audio_section(put, streams)
+
+        if not msgs:
+            return
         dmg = sum(1 for m in msgs if m.damaged)
         cut = sum(1 for m in msgs if m.check != "intact")
-        t.insert("end", f"{len(msgs)} message(s) in {len(dls)} dialog(s)"
-                        + (f", {cut} truncated" if cut else "")
-                        + (f", {dmg} with a lost first byte" if dmg else "")
-                        + NL)
-        t.insert("end", "Grouped by Call-ID in wire order. Authorization and "
-                        "WWW-Authenticate values are redacted." + NL*2)
+        put(f"{len(msgs)} message(s) in {len(dls)} dialog(s)"
+            + (f", {cut} truncated" if cut else "")
+            + (f", {dmg} with a lost first byte" if dmg else "") + NL, "dim")
+        put("Grouped by Call-ID in wire order. Authorization and "
+            "WWW-Authenticate values are redacted." + NL*2, "dim")
 
         for d in dls:
-            t.insert("end", f"CALL-ID {d.call_id or '(none recovered)'}{NL}")
-            t.insert("end", f"   {d.from_uri}  ->  {d.to_uri}{NL}")
-            t.insert("end", f"   {d.outcome}"
-                            + (f"   methods: {', '.join(d.methods)}"
-                               if d.methods else "")
-                            + f"   ({len(d.messages)} message(s)){NL}")
+            put(f"CALL-ID {d.call_id or '(none recovered)'}{NL}", "head")
+            put("   ")
+            put(d.from_uri, "uri")
+            put("  ->  ", "dim")
+            put(d.to_uri + NL, "uri")
+            put("   ")
+            put(d.outcome, self._outcome_tag(d))
+            put((f"   methods: {', '.join(d.methods)}" if d.methods else "")
+                + f"   ({len(d.messages)} message(s)){NL}", "dim")
             for md in d.media:
-                t.insert("end", f"   media: {md.kind} {md.address}:{md.port} "
-                                f"{md.proto}  {', '.join(md.formats)}{NL}")
+                put(f"   media: {md.kind} {md.address}:{md.port} "
+                    f"{md.proto}  {', '.join(md.formats)}{NL}", "audio")
             for m in d.messages:
+                put(f"   @{m.offset}  ", "dim")
+                if m.kind == "request":
+                    put(m.method + " ", "method")
+                    put(m.uri, "uri")
+                else:
+                    put(f"{m.status} ", self._status_tag(m.status))
+                    put(m.reason, self._status_tag(m.status))
                 flags = [] if m.check == "intact" else [m.check]
                 if m.damaged:
                     flags.append("lost 1st byte")
-                t.insert("end", f"   @{m.offset}  {m.summary}"
-                                + (f"   [{', '.join(flags)}]" if flags else "")
-                                + NL)
+                if flags:
+                    put(f"   [{', '.join(flags)}]", "flag")
+                put(NL)
                 for k, v in m.headers:
-                    t.insert("end", f"        {k}: {v}{NL}")
+                    put(f"        {k}: ", "hname")
+                    put(v + NL, "hval")
                 if m.body:
                     for line in m.body.decode("utf-8", "replace"
                                               ).splitlines()[:12]:
-                        t.insert("end", f"        | {line[:150]}{NL}")
-            t.insert("end", NL)
+                        put(f"        | {line[:150]}{NL}", "dim")
+            put(NL)
+
+    def _outcome_tag(self, d):
+        codes = [m.status for m in d.messages if m.kind == "response"]
+        if any(200 <= c < 300 for c in codes):
+            return "ok"
+        if any(c >= 400 for c in codes):
+            return "bad"
+        return "prov"
+
+    def _sip_audio_section(self, put, streams):
+        if not streams:
+            put("AUDIO (RTP)" + NL, "head")
+            put("   none -- no RTP stream in this payload. Signalling can be "
+                "present without any call being set up." + NL*2, "dim")
+            return
+        dec = [s for s in streams if s.decodable]
+        put(f"AUDIO (RTP) -- {len(streams)} stream(s), "
+            f"{len(dec)} decodable{NL}", "head")
+        for s in streams:
+            put("   ")
+            put(s.codec + "  ", "audio" if s.decodable else "flag")
+            put(f"{s.src}:{s.sport} -> {s.dst}:{s.dport}  "
+                f"ssrc {s.ssrc:#010x}  {len(s.packets)} pkts", "dim")
+            if s.decodable:
+                put(f"  {s.seconds:.1f}s", "audio")
+            if s.lost:
+                put(f"  {s.lost} lost", "flag")
+            put(NL)
+        if dec:
+            put('   "Save call audio" writes each decodable stream to an '
+                "8 kHz WAV." + NL, "dim")
+        put(NL)
+
+    def _exp_audio(self):
+        r = self._need()
+        if not r:
+            return
+        streams = getattr(r, "rtp_streams", None)
+        if streams is None:
+            streams = rtp.streams(r.payload)
+        dec = [s for s in streams if s.decodable]
+        if not dec:
+            messagebox.showinfo(
+                "No audio",
+                "No decodable RTP stream in this payload.\n\n"
+                "G.711 (PCMU/PCMA) is decoded; a call must be set up for any "
+                "RTP to exist at all. The captures here carry OPTIONS "
+                "keepalives, which establish no media.")
+            return
+        d = filedialog.askdirectory(title="Folder for the call audio")
+        if not d:
+            return
+        stem = safe_stem(Path(r.info.get("path", "capture")).stem)
+        n = 0
+        for s in dec:
+            name = f"{stem}_rtp_{s.ssrc:08x}_{s.codec}.wav"
+            rtp.write_wav(s, Path(d)/name)
+            n += 1
+        self.expvar.set(f"wrote {n} WAV file(s) to {d}")
 
     def _exp_files(self):
         r = self._need()

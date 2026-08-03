@@ -27,6 +27,7 @@ Submodules, roughly bottom-up:
     pcapout   pcap writers and IPv4 carving
     findings  certificates, DNS, HTTP and TLS carved from a payload
     sip       SIP messages carved from a payload, grouped into dialogs
+    rtp       RTP audio streams carved from a payload, G.711 decoded to PCM
     tx        reference transmitter, used to validate the receiver
     update    version check against the published VERSION file (opt-out)
 
@@ -57,5 +58,6 @@ __version__ = _read_version()
 
 __all__ = [
     "annex", "bctpdu", "bctrl", "bulletin", "carrier", "decoder", "mod", "pcapout",
-    "findings", "pipeline", "recv", "sip", "spec", "turbo", "tx", "update",
+    "findings", "pipeline", "recv", "rtp", "sip", "spec", "turbo", "tx",
+    "update",
 ]
