@@ -202,6 +202,19 @@ is the same check from the command line. Set `BGAN_NO_UPDATE_CHECK=1` to turn
 it off; `bgan/update.py` is the only thing in the project that touches the
 network.
 
+`VERSION` is bumped automatically: [`.github/workflows/version-bump.yml`](.github/workflows/version-bump.yml)
+increments the patch number whenever a PR merges into `main`. Label a PR
+`minor` or `major` to change the level, or `no-version-bump` to skip it.
+By hand:
+
+```bash
+python tools/bump_version.py minor
+```
+
+`VERSION` is the only file that carries the number — `bgan.__version__` reads
+it and `bgan.update` asks the package — so there is nothing else to keep in
+step.
+
 ---
 
 ## Validation
