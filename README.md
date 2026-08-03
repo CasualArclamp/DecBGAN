@@ -15,7 +15,8 @@ Written in Python with numba for the turbo decoder. No compiler needed.
 ## What it does
 
 - **Front end** — channelisation, RRC matched filtering, symbol-clock
-  recovery, frame acquisition and tracking, pilot-aided phase correction
+  recovery, frame acquisition and tracking, residual carrier-offset removal
+  measured on the unique words, pilot-aided phase correction
 - **FEC** — the full SRCC turbo codec: Annex C.1 turbo interleaver, Annex C.2
   puncturing / channel interleaving / QAM mapping, max-log-MAP BCJR decoding
   at all ten coding levels (L8…H6)
@@ -34,6 +35,13 @@ Being precise about this, because the gap is real:
   the difference was a single global symbol-timing phase, which a recording
   with dropped samples invalidates (see docs/VALIDATION.md). Weak or
   interference-hit captures still do worse.
+- **Captures down to ~5 dB Es/N0 decode**, where previously nothing below
+  9 dB did. Two separate defects caused that, both found in Aug 2026: a
+  biased spectral-centroid carrier estimate that left several hundred Hz of
+  offset — enough to break the pilot phase unwrap and kill every block in a
+  frame — and a block-acceptance threshold placed inside the range that
+  correct decodes occupy rather than above the range that wrong ones do. See
+  docs/SIGNAL_NOTES.md and docs/VALIDATION.md.
 - **No protocol demux.** Payload is decoded FEC blocks concatenated, with
   silent gaps where blocks failed. IP packets are *carved* by scanning for
   valid IPv4 headers, not reassembled. The layers that specify how to do it
@@ -174,6 +182,20 @@ rose 13 -> 28 (of 29 possible), the frame-no offset and 17-frame period were
 unchanged, and AVP-predicted coding levels went from 103/0 to 219/0
 agree/disagree. A decoder manufacturing blocks would not do that.
 
+The same test carried the Aug 2026 threshold change. On `1553.500`, yield went
+from 15 blocks to 1721; its BulletinBoard went from unmeasurable to **13/232**
+on-cycle on a strict 17-frame period, and AVP-predicted levels from nothing to
+**747 agree / 0 disagree**. On `1547.298`, 331 blocks -> 1887 and AVP agreement
+125/0 -> **1441/0**. The two captures that gain no blocks are bit-identical on
+every column.
+
+**5. The acceptance test is calibrated against a labelled negative set.**
+Correct decodes (ground truth from the synthetic generator, Es/N0 5-12 dB)
+never scored below 0.7585 parity agreement; 37281 blocks that *cannot* decode
+— wrong frame offset, shifted offset, matched-power Gaussian noise, drawn
+from synthetic and real captures alike — never scored above 0.6023. The
+threshold sits in that gap, with zero false accepts. See docs/VALIDATION.md.
+
 ---
 
 ## Layout
@@ -187,6 +209,7 @@ bgan/
   decoder.py    max-log-MAP BCJR, soft demapper (numba)
   mod.py        16-QAM, scrambler, frame assembly
   recv.py       channelisation, timing, carrier, frame sync
+  carrier.py    residual carrier offset, from the unique words
   pipeline.py   end-to-end synchronise + decode
   bctrl.py      code-rate AVP, per-block level resolution
   bulletin.py   BulletinBoard SDU, AVP list walking

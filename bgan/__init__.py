@@ -19,6 +19,7 @@ Submodules, roughly bottom-up:
     decoder   max-log-MAP BCJR and soft demapper, numba-compiled
     mod       16-QAM mapping, scrambler, frame assembly (clause 5.3)
     recv      channelisation, carrier location, timing, frame sync
+    carrier   residual carrier offset, measured on the unique words
     pipeline  synchronise + decode_frame, end to end
     bctrl     ForwardBearerCodeRateParam, per-block level resolution (3-1)
     bulletin  BulletinBoard SDU and AVP list walking (3-1 clause 5.4.3)
@@ -34,9 +35,9 @@ README.md for where to fetch them; `bgan.annex.annex_dir` looks in the
 repository root, `work/` and `annex/`.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
-    "annex", "bctrl", "bulletin", "decoder", "mod", "pcapout",
+    "annex", "bctrl", "bulletin", "carrier", "decoder", "mod", "pcapout",
     "pipeline", "recv", "spec", "turbo", "tx",
 ]

@@ -55,6 +55,14 @@ this artifact, and it appears to have motivated loosening the turbo decoder's
 parity-agreement threshold from 0.85 to 0.58, which manufactures false
 positives rather than recovering data.
 
+That last sentence has since been measured rather than asserted, and it holds
+**for 0.58 specifically**: blocks that cannot possibly decode reach 0.6023
+agreement, so 0.58 sits inside the false-positive distribution. Note what the
+same measurement says about the rest of the range — correct decodes never
+fall below 0.7585, so our own 0.90 was too *tight* by as much as 0.58 was too
+loose. Both errors came from picking a number without a labelled negative
+set. See docs/VALIDATION.md.
+
 Use the 2.048 MHz captures for anything involving signal quality.
 
 ## Measurements on BGAN1.wav
@@ -765,3 +773,148 @@ Also note `1543.100_17-46-31` is still 0 either way, so carrier wander is not
 the explanation for that one. Its first ten seconds carry no decodable data at
 any of the top five UW peaks across all eight timing phases (best agreement
 0.54), and the whole-file decode finds nothing anywhere.
+
+## Three defects behind every "frames cleanly, decodes nothing" capture (Aug 2026)
+
+All three were found chasing the same symptom, and none is what the symptom
+looked like. The user's read of the waterfall started this: two screenshots
+side by side, one carrier flat-topped and one domed. That shape difference
+did more diagnostic work than the ten scalar measurements before it.
+
+### 1. The spectral centroid is a biased carrier estimator
+
+`refine_centre` locates a carrier by the centroid of its power spectrum,
+which is unbiased only if the spectrum is symmetric. On a capture whose
+spectrum is domed or tilted the centroid lands off the true carrier, and the
+error survives channelisation as a residual frequency offset.
+
+Measured on 8 s of each capture, offset from the unique words:
+
+    capture      ripple   residual      UW EVM         blocks (of 64)
+    1543.100b    1.2 dB    +176 Hz   0.192 -> 0.170     64 -> 64
+    1543.100a    3.5 dB    -857 Hz   0.456 -> 0.142      0 -> 60
+    1553.500     4.9 dB   -1625 Hz   1.020 -> 0.331      0 ->  0
+    1550.398     2.9 dB    -507 Hz   0.435 -> 0.350      0 ->  0
+    1547.298     0.8 dB     +63 Hz   0.264 -> 0.262      6 ->  6
+
+Several hundred Hz was invisible to every check the receiver made, and fatal:
+
+  * The differential UW correlation compares adjacent symbols, 6.6 us apart.
+    At 857 Hz that is 0.036 rad, so framing and timing looked perfect --
+    metric 60-72 on captures yielding nothing.
+  * M4/M2^2, the |x|^2 timing tone and the PSD median are all blind to it.
+  * `prepare()` fits phase across pilots 137 symbols = 906 us apart. At
+    857 Hz the phase advances 4.9 rad between pilots, past pi, so
+    `np.unwrap` steps the wrong way and every block in the frame dies.
+
+The unwrap limit puts a cliff at 1/(2*906us) = **552 Hz**. Below it a capture
+decodes normally; above it, nothing decodes at all. That is why these failed
+so completely instead of degrading -- and it is the same failure mode already
+documented for the 1.3 kHz phantom-candidate bug, arriving by a different route.
+
+`bgan/carrier.py` estimates the offset from the unique words: periodogram of
+`v * conj(uw)` per frame, magnitudes summed across frames. Coherent within a
+frame, non-coherent across them, which is the ML form given that each frame
+carries its own unknown phase. It converges in one iteration (second pass
+returns -0.0 Hz on every capture) and needs no re-sync afterwards.
+
+A per-frame Kay estimator plus a median was tried first and is worse: 40
+symbols is too short, and on 1553.500 the per-frame estimates scattered with
+a standard deviation of 15.2 kHz about their own median.
+
+### Ripple was a correlate, not the cause -- and the equaliser was wrong
+
+Flattening the measured magnitude response took 1543.100a from 0/64 to 60/64,
+which looked like proof of frequency-selective distortion. It was not. A
+lopsided spectrum is what biases the centroid, so flattening it symmetrised
+the spectrum and moved the centroid onto the true carrier. The recovery was
+real; the explanation was wrong.
+
+A proper least-squares equaliser, fractionally spaced at T/4 and trained on
+the same unique words, settles it. Held-out EVM, 33 to 513 taps, after the
+carrier offset is removed: no improvement on any capture, and it costs
+1547.298 all six of its blocks. Ripple is worth reporting as a diagnostic
+(`carrier.band_ripple`) because it predicts *which* captures will have a
+biased centroid. It is not worth equalising.
+
+### 2. The acceptance threshold sat inside the true distribution
+
+With the carrier fixed, 1553.500 produced blocks that passed the
+likelihood-ratio re-encode check 60 times out of 64 -- with parity agreement
+0.881, just under the 0.90 threshold that gated them. So the blocks were
+decoding and being thrown away.
+
+Calibrated against ground truth from `tools/make_test_iq.py` at Es/N0 5..12 dB,
+with negatives from impossible blocks (wrong frame offset, shifted offset,
+Gaussian noise at matched power) drawn from both synthetic and real captures:
+
+    correct decodes, minimum agreement over 1119 blocks     0.7585
+    impossible tries, maximum agreement over 37281 tries    0.6023
+
+Nothing falls between them. Recall of genuinely correct blocks:
+
+           5dB   6dB   7dB   8dB   9dB  10dB  12dB
+    0.90    0%    0%    0%    0%   56%   99%  100%
+    0.70  100%  100%  100%  100%  100%  100%  100%
+
+0.90 was not conservative, it was wrong: it rejected **every** correct block
+below 9 dB, and three captures on hand sit at 7.3-7.6 dB. Now
+`decode_wav.ACCEPT_AGREEMENT = 0.70`.
+
+The likelihood-ratio check still cannot stand alone -- on impossible blocks it
+accepts ~3% of tries, which across ten candidate levels is a false level on
+about a quarter of all blocks. Both conditions are load-bearing.
+
+An earlier note in `verify_block` argued that a fixed agreement threshold is
+the knob that "gets loosened when it starts rejecting good frames, and
+loosening it manufactures false positives rather than recovering data." Sound
+instinct, wrong conclusion, and it cost real data for months. What settles
+where a threshold belongs is a labelled negative set, not a rule against
+touching it.
+
+### 3. The carrier probe inherited the bug survey_taus exists to fix
+
+With the first two fixed, `1553.500` still came back "no F80T4.5X-8B carrier
+found" — but only at some capture lengths. Its UW metric by window:
+
+    6 s   8 s   10 s   12 s   16 s   20 s
+    54.2  49.0  50.8   22.7   49.3   44.1
+
+Nothing about the signal changes at 12 s. `probe_centre` evaluated the UW
+correlation at a **single global timing phase**, exactly the mistake that
+took the main decode path from 39.2% to 98.5% when it was fixed there. The
+12 s window happens to put `estimate_symbol_clock` on a phase that is wrong
+for the frames being probed, the metric collapses to noise, and a perfectly
+good carrier is rejected before any decoding is attempted.
+
+Fixing it everywhere would cost 8x on every capture, so `pick_carrier` now
+escalates only candidates it is about to reject: probe at one phase, and if
+that fails `min_ratio` while the symbol clock still looks plausible, re-probe
+across all eight before condemning it. Captures that already pass are
+bit-identical and pay nothing. On 1553.500 at 12 s the metric goes 22.7 ->
+68.2, the highest of any window.
+
+The general lesson, which has now cost three separate bugs: **a global timing
+phase is never safe on these recordings.** Any new code that samples symbols
+must either search the phase or borrow one that was searched.
+
+### A crash the threshold change exposed: AVP naming a level we cannot decode
+
+`levels_from_block0` reads the ForwardBearerCodeRateParam out of block 0 and
+uses it to hint the level of blocks 1-7. CodeRate Table 5.20 spans L8..H6,
+fifteen values, but F80T4.5X-8B defines ten and only those ten have Annex C
+tables. A hint naming L4..L8 reached `tx.tables()`, which raised
+FileNotFoundError from inside the per-block decode loop and aborted the entire
+capture -- every remaining frame lost to one bad byte.
+
+The tag test accepts 8 of 256 random bytes, so any block 0 whose payload is
+not really a BCtPDU can produce one. The synthetic captures hit it readily,
+their payloads being random bits by construction: four of five aborted, at
+both the old and new thresholds. It was latent all along, not introduced by
+the threshold change -- but a change that makes more block 0s decode makes it
+much easier to reach.
+
+Fixed by blanking hints outside the bearer's ten levels so the block is
+searched instead. Worth stating as a rule: a value read out of decoded traffic
+is untrusted input, and using it to index a table of files is enough to lose a
+whole capture.

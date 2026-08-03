@@ -601,6 +601,16 @@ class App(tk.Tk):
             f"(16QAM 1.32 / QPSK 1.00 / noise 2.00)",
             f"  Es/N0 (est)     {i['esn0']:.1f} dB",
         ]
+        # Unique-word EVM is the only figure here that predicts a residual
+        # carrier offset. The UW correlation metric does not -- being
+        # differential, it stays at 60-72 on captures that decode nothing.
+        if np.isfinite(i.get("uw_evm", float("nan"))):
+            txt.append(f"  UW EVM          {i['uw_evm']:.3f}   "
+                       f"(~0.17 decodes, ~0.45 does not)")
+        if i.get("cfo_applied"):
+            txt.append(f"  carrier resid   {i['cfo_hz']:+.1f} Hz removed"
+                       + ("  (past pilot-unwrap limit)"
+                          if abs(i["cfo_hz"]) > 552.0 else ""))
         self.infobox.delete("1.0", "end")
         self.infobox.insert("end", "\n".join(txt) + extra)
 

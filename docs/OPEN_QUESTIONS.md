@@ -139,16 +139,36 @@ The M4/M2^2 estimator used for that figure is calibrated against the loopback
 transmitter and is accurate to +/-0.25 dB over 8..20 dB, so the gap is real
 rather than an artifact of the estimator.
 
-### 9. Three captures that frame cleanly but decode nothing
+### 9. Three captures that frame cleanly but decode nothing — RESOLVED
 `1553.500` and `1550.398` produce a strong unique-word correlation (metric
 57-61), correct 12096-symbol frame spacing and a proper 16-QAM constellation,
 yet no block decodes at any offset or coding level.
 
-Ruled out by measurement, not assumption: carrier offset (residual CFO within
-the 552 Hz pilot-unwrap limit), clipping (peaks at 5-8% of full scale), weak
-signal, adjacent carriers, wrong bearer type, matched-filter roll-off (EVM flat
-across beta 0.18-0.35), phase noise (pilot fit residual comparable to captures
-that work), and a data/UW offset (+/-300 symbol sweep, best agreement 0.569).
+Two causes, both now fixed; see SIGNAL_NOTES.md "Two defects behind every
+'frames cleanly, decodes nothing' capture".
+
+1. A residual carrier offset left by the spectral-centroid carrier estimator,
+   which is biased whenever the spectrum is not symmetric. Past the 552 Hz
+   pilot-unwrap limit this kills every block in a frame with no other
+   visible symptom. Now measured from the unique words and removed
+   (`bgan/carrier.py`).
+2. The block-acceptance parity threshold sat at 0.90, inside the range that
+   *correct* decodes occupy below 9 dB. It rejected every correct block on
+   captures at 7-8 dB. Now 0.70, calibrated against ground truth and 37281
+   impossible blocks.
+
+**The line below was wrong, and is kept because the error is instructive.**
+It claimed carrier offset had been "ruled out by measurement" and was inside
+the 552 Hz limit. It was -1625 Hz on 1553.500. The measurement that produced
+that claim used the pilot phase fit, which is precisely the thing an offset
+past 552 Hz breaks -- so the check was reading its own failure as a pass. A
+diagnostic that shares a failure mode with the defect cannot clear it.
+
+> Ruled out by measurement, not assumption: carrier offset (residual CFO within
+> the 552 Hz pilot-unwrap limit), clipping (peaks at 5-8% of full scale), weak
+> signal, adjacent carriers, wrong bearer type, matched-filter roll-off (EVM flat
+> across beta 0.18-0.35), phase noise (pilot fit residual comparable to captures
+> that work), and a data/UW offset (+/-300 symbol sweep, best agreement 0.569).
 
 **A related case was solved and is a warning about method.** `1543.100` looked
 identical to these and survived the same nine tests -- then decoded 40/48
