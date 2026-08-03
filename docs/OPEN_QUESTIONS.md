@@ -181,7 +181,7 @@ is the cheapest test available and it invalidates everything downstream of it.
 Whether the two remaining files have any good segment at all is still open:
 t=0/15/30/45 s were tried and all failed.
 
-### 10. An inserted framing header, found but not solved — OPEN
+### 10. The inserted framing header — IDENTIFIED, reassembly still open
 
 Reconstructing documents turned up a structure that interrupts the byte
 stream. It is almost certainly the Bearer Connection or Adaptation Layer PDU
@@ -229,7 +229,42 @@ Stripping in the bit domain does not beat stripping in the byte domain
 alignment. Chasing it further by reverse engineering has hit diminishing
 returns.
 
-**The way forward is the specification, not more guessing.** TS 102 744-3-5
-and -3-6 are the Adaptation Layer interface and operation, and are already in
-`docs/`. They should define this header outright. Read those before
-attempting more of this.
+**Resolved by reading the specification, which is what should have happened
+first.** It is the Bearer Control PDU boundary, TS 102 744-3-1 clause 5.1.2:
+
+    FwdBCtPDUHeader | BCtSDU 1 .. BCtSDU n | bct-payload | CRC
+
+`bct-payload` is a BCnPDU or ALComPDU, both `OCTET STRING (SIZE(0..255))`.
+That 255-octet ceiling is the ~260-byte period, measured before the clause was
+read: a full user-data PDU plus header and CRC.
+
+Clause 5.1.7 gives a CRC, and a CRC validates a parse instead of suggesting
+one. Generator x16+x12+x5+1, register all ones, clocked from bit 1 of the
+first octet, ones complement appended -- standard HDLC/X-25 FCS, with the
+spec's own stated residue of 0xF0B8 over a PDU including its CRC. That residue
+is asserted at import in `bgan/bctpdu.py`, so the polynomial, bit order and
+complement are all pinned by the specification rather than guessed.
+
+It also explains the two insertion families found by diffing repeated
+certificates. The header's first octet is
+
+    0xc9  1 1 00 1 001  sdu-follows, length, broadcast -- BulletinBoard
+    0x58  0 1 01 1 000  length present, connection PDU -- user data
+    0x18  0 0 01 1 000  no length octet, connection PDU
+
+and 0x18 against 0x58 is exactly 7 bytes against 8: the length octet. 0xc9 is
+the value already measured on all 490 block-0 payloads of BGAN19.
+
+A CRC hit alone is still not evidence -- trying ~245 lengths at every position
+finds one every ~268 bytes, and over 300 kB the raw count was 1096 against
+1122 expected, 0.98x. Detection needs CRC *and* a known header octet, the same
+two-condition discipline the block-acceptance test uses. Control: 9 PDUs in
+300 kB of random bytes against 39 in a 12 kB window of real payload, 108x
+denser.
+
+**Still open: reassembly.** Boundaries are located; the BCtSDU walk and
+per-connection ordering are not implemented, and they live in TS 102 744-3-3
+and -3-4. Concatenating detected payloads with a fitted header length recovers
+847 bytes of a gzipped XML document several kB long, so this is a foundation
+rather than a demultiplexer. The `extra=2` in `bctpdu.payloads` is fitted, not
+derived, and should disappear once the SDU walk is real.

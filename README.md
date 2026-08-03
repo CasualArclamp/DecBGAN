@@ -28,8 +28,11 @@ Written in Python with numba for the turbo decoder. No compiler needed.
 - **Findings** — X.509 certificates, DNS messages, HTTP transactions and TLS
   handshakes carved from the payload, plus the set of hostnames they
   implicate. Structurally validated: 0 false accepts per 8 MB of random bytes
+- **Files** — HTTP response bodies reconstructed as files, gzip/deflate
+  inflated, each labelled intact / truncated / unverified by a check
+  appropriate to its type
 - **GUI** — spectrum, live constellation, carrier/bearer info, and tabs for
-  findings, strings, bearer control and carved packets
+  findings, files, strings, bearer control and carved packets
 
 ## What it does *not* do
 
@@ -113,6 +116,13 @@ python tools/gui.py path/to/capture.wav
 Spectrum and live constellation, a progress bar, carrier and bearer-control
 readouts, then tabs for findings, strings, parsed BulletinBoards, carved
 packets and a log.
+
+**Files** reconstructs whole HTTP bodies and will save them to a folder. Each
+is labelled by a check suited to its type: text must be printable throughout,
+DER must parse end to end, and anything else is reported `unverified` rather
+than assumed good. On the richest capture that reads 2 intact, 17 truncated,
+2 unverified — most bodies are cut by the Bearer Control PDU framing (see
+docs/OPEN_QUESTIONS.md item 10), and saying so is the point of the flag.
 
 **Interesting** is the first tab and leads with the hostnames the capture
 implicates, then the certificates, DNS messages, TLS handshakes and HTTP

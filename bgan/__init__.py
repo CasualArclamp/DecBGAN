@@ -22,6 +22,7 @@ Submodules, roughly bottom-up:
     carrier   residual carrier offset, measured on the unique words
     pipeline  synchronise + decode_frame, end to end
     bctrl     ForwardBearerCodeRateParam, per-block level resolution (3-1)
+    bctpdu    Bearer Control PDU framing, located by its CRC (3-1 5.1.7)
     bulletin  BulletinBoard SDU and AVP list walking (3-1 clause 5.4.3)
     pcapout   pcap writers and IPv4 carving
     findings  certificates, DNS, HTTP and TLS carved from a payload
@@ -39,6 +40,6 @@ repository root, `work/` and `annex/`.
 __version__ = "0.3.0"
 
 __all__ = [
-    "annex", "bctrl", "bulletin", "carrier", "decoder", "mod", "pcapout",
+    "annex", "bctpdu", "bctrl", "bulletin", "carrier", "decoder", "mod", "pcapout",
     "findings", "pipeline", "recv", "spec", "turbo", "tx",
 ]

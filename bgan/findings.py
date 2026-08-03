@@ -430,24 +430,47 @@ class Document:
         return f"doc_{self.offset:08d}{base}"
 
     @property
-    def intact(self):
-        """Does the body look like an uninterrupted run of its own type?
+    def check(self):
+        """"intact", "truncated" or "unverified".
 
         There is no way to *prove* the bytes after a header belong to that
-        response -- the payload is FEC blocks concatenated with no
-        reassembly, so the next block may be someone else's traffic. What can
-        be checked is self-consistency: a text body that is entirely
-        printable, or a compressed body that inflates, almost certainly is
-        the real thing. A text body that turns to binary partway is the
-        signature of the response being cut off by an unrelated block.
+        response -- the payload is FEC blocks concatenated with no reassembly,
+        so what follows may be someone else's traffic. Only self-consistency
+        can be checked, and only for types that carry their own structure:
+
+          text        entirely printable, or it was cut off partway
+          DER         the outer TLV consumes exactly the body, or it was not
+          everything else   no check exists, so none is claimed
+
+        The third case matters. Returning "intact" for anything unrecognised
+        would have called a CRL intact while it visibly contained inserted
+        Bearer Control PDU headers; saying "unverified" is the honest answer
+        and is what the GUI shows.
         """
         if not self.data:
-            return False
-        if self.ctype.startswith(("text/", "application/json",
-                                  "application/xml", "text/x-json")):
-            ok = sum(1 for c in self.data if 0x09 <= c <= 0x7e or c in (0x0a, 0x0d))
-            return ok/len(self.data) > 0.98
-        return True
+            return "truncated"
+        ct = self.ctype.split(";")[0].strip().lower()
+        if ct.startswith(("text/", "application/json", "application/xml",
+                          "text/x-json", "application/javascript")):
+            ok = sum(1 for c in self.data
+                     if 0x09 <= c <= 0x7e or c in (0x0a, 0x0d))
+            return "intact" if ok/len(self.data) > 0.98 else "truncated"
+        if ct in ("application/pkix-crl", "application/pkix-cert",
+                  "application/x-x509-ca-cert", "application/ocsp-response"):
+            # The outer length alone is not enough. An inserted Bearer Control
+            # PDU header displaces bytes rather than extending the slice, so
+            # the outer TLV still measures right while the contents are
+            # scrambled -- a CRL reported "intact" with 58 3e sitting in the
+            # middle of "Scottsdale". Walk the children too.
+            t = _tlv(self.data, 0)
+            if not t or t[2] != len(self.data):
+                return "truncated"
+            return "intact" if _children(self.data, t[1], t[2]) else "truncated"
+        return "unverified"
+
+    @property
+    def intact(self):
+        return self.check == "intact"
 
 
 def _inflate(data, wbits):

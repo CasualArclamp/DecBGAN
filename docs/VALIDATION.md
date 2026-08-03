@@ -876,3 +876,33 @@ on the decode phase alone; the remaining gap would need `turbo_encode` and
 
 `--jobs N` or `$BGAN_JOBS` overrides the worker count; `--jobs 1` restores the
 sequential path exactly.
+
+### The Files tab, and what "intact" is allowed to mean
+
+`findings.documents()` reconstructs HTTP bodies, and the GUI shows them with a
+per-file verdict. The verdict is only as good as the check behind it, so it is
+one of three rather than a boolean:
+
+    text        intact if printable throughout, else truncated
+    DER         intact if the outer TLV consumes the body exactly AND its
+                children parse, else truncated
+    everything else                                        unverified
+
+The middle row was wrong at first and is worth recording. Checking only the
+outer TLV length passed a Go Daddy CRL as intact while it visibly contained an
+inserted Bearer Control PDU header -- `58 3e` sitting in the middle of
+"Scottsdale". An insertion *displaces* bytes rather than extending the slice,
+so the outer length still measures correctly; only walking the children
+catches it. With the full walk, on the 60 s decode of 1543.100a:
+
+    before (outer length only)   15 intact,  6 truncated
+    after  (full DER walk)        2 intact, 17 truncated, 2 unverified
+
+The second row is the truthful one. Eleven of twelve CRLs are cut by PDU
+framing; one survived, and it parses end to end as a `CertificateList` with
+three children and issuer `C=US, O=The Go Daddy Group, Inc., OU=Go Daddy
+Class 2 Certification Authority`.
+
+"unverified" exists because returning "intact" for a type carrying no
+self-check would be a claim the data does not support. Two files on that
+capture fall into it.
