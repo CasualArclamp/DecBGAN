@@ -780,3 +780,33 @@ each other: this is marine/solar monitoring equipment reporting home.
 This is corroboration of the decode as much as it is output. A DNS message
 whose label lengths walk exactly to a terminating zero, followed by QCLASS IN
 and a known QTYPE, is not something a mis-tuned acceptance threshold produces.
+
+### Which captures actually carry findings
+
+Measured over a 20 s decode of each, so the comparison is like for like:
+
+    capture        blocks   payload   findings   /MB   hosts
+    1543.100a       96.8%   0.63 MB      142     227     47
+    1543.100b       96.0%   0.94 MB      104     110     41
+    BGAN10          87.1%   0.59 MB       28      48      7
+    BGAN15          98.6%   0.85 MB       36      42      9
+    BGAN9           91.0%   0.67 MB       13      19      4
+    1547.298        95.1%   0.68 MB        2       3      1
+    1553.500        86.7%   0.44 MB        0       0      0
+
+`1543.100a` is the richest by a factor of two, with 21 certificates in 20 s
+against 3 for the capture actually named "lots of data". That is the capture
+which decoded **nothing at all** before Aug 2026.
+
+The two at the bottom are not failures of the extractors, and they agree with
+the content analysis done independently:
+
+  * `1553.500` yields zero findings while decoding 86.7% of its blocks. It is
+    92.8% zero bytes -- an idle bearer sending filler. Nothing to find is the
+    correct answer, and a scanner that returned findings here would be wrong.
+  * `1547.298` yields two from 0.68 MB. It is 0.7% zeros and high entropy,
+    i.e. encrypted bulk traffic with no plaintext handshakes in the window.
+
+Payload size does not predict findings: `1543.100b` decodes half again as many
+bytes as `1543.100a` and finds a third fewer things, because more of its bytes
+are one bulk transfer rather than many small exchanges.

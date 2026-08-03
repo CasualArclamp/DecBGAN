@@ -118,7 +118,12 @@ packets and a log.
 implicates, then the certificates, DNS messages, TLS handshakes and HTTP
 transactions behind them. Everything there is carved rather than reassembled,
 so anything spanning a failed block is lost — certificates in particular
-rarely parse whole and are usually recovered from their validity block. Export buttons produce a lossless block pcap, a carved-IPv4 pcap, or the
+rarely parse whole and are usually recovered from their validity block.
+
+Not every capture has much to show: an idle bearer yields nothing, and
+correctly so. Of the captures on hand `1543.100a` is much the richest
+(227 findings per MB, 47 hosts in 20 s); see docs/VALIDATION.md for the
+comparison. Export buttons produce a lossless block pcap, a carved-IPv4 pcap, or the
 raw payload; each is named after the capture it came from, so exports from
 different recordings do not collide.
 
