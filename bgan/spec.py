@@ -37,7 +37,7 @@ class Bearer:
 
     @property
     def alloc_bw(self):
-        """Allocated RF bandwidth, Hz: rs*(1 + alpha). 189 kHz for F80T4.5X-8B."""
+        """Allocated RF bandwidth, Hz: rs*(1+alpha). 189 kHz for F80T4.5X-8B."""
         return self.rs*(1 + ROLLOFF)
 
     def power_bw(self, frac=0.99):
@@ -57,7 +57,7 @@ class Bearer:
             raise ValueError("frac must be in (0, 1)")
         a = ROLLOFF
         target = pi*(1 - frac)/a
-        lo, hi = 0.0, pi                    # t - sin t rises 0 -> pi on [0, pi]
+        lo, hi = 0.0, pi                # t - sin t rises 0 -> pi over [0, pi]
         if target >= pi:                    # frac so small the flat top is cut
             return self.rs*(1 - a)*frac/(1 - a/2)
         for _ in range(80):
