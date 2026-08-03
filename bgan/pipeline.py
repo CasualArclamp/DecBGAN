@@ -141,9 +141,22 @@ def verify_block(bits, t, slot_llr, margin_nats=1200.0):
     single z threshold separates both: 4.0 rejects good blocks at 12 dB, 6.0
     admits bad ones at 4 dB. The likelihood ratio has no such drift.
 
-    And a *fixed* agreement threshold is worse still -- that is the knob that
-    gets loosened when it starts rejecting good frames, and loosening it
-    manufactures false positives rather than recovering data.
+    This test is necessary but NOT sufficient, and the docstring used to
+    claim otherwise. On blocks that cannot possibly decode -- wrong frame
+    offset, or Gaussian noise at matched power -- it accepts about 3% of
+    tries, which across ten candidate coding levels is a false level on
+    roughly a quarter of all blocks. It must be paired with the parity
+    agreement threshold (decode_wav.ACCEPT_AGREEMENT); together they give
+    zero false accepts over 37281 impossible tries.
+
+    A companion claim here, that a fixed agreement threshold "is worse
+    still" because loosening it manufactures false positives, was wrong and
+    cost real data. The threshold sat at 0.90, which is inside the range
+    that *correct* decodes occupy below 9 dB, and it rejected every correct
+    block on three real captures. Wrong decodes score ~0.5 and never
+    exceeded 0.6023 in any test; correct ones never fell below 0.7585. The
+    warning is sound as an instinct and useless as an argument -- what
+    settles where a threshold belongs is a labelled negative set.
 
     margin_nats was chosen against the labelled reference set from
     tools/make_test_iq.py (5 captures, 4960 blocks, ground truth known):

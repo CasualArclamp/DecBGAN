@@ -100,6 +100,9 @@ def decode_block(blk, level, s2=0.5, iters=8):
 
 def main():
     path = sys.argv[1]
+    # This tool has no likelihood-ratio check, so it keeps the old, tighter
+    # threshold. decode_wav.ACCEPT_AGREEMENT is 0.70 only because it is
+    # paired with verify_block; 0.70 on agreement alone would false-accept.
     thr = float(sys.argv[2]) if len(sys.argv) > 2 else 0.90
     z = np.fromfile(path, dtype=np.complex64).astype(np.complex128)
     phi, lvl, psr = find_frame_offset(z[:60*MOS])

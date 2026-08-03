@@ -23,7 +23,7 @@ Run 30 July 2026, max-log-MAP, 8 iterations, extrinsic scaling 0.75:
 Mean margin +1.95 dB, range +1.62 to +2.69.
 
 **Why this is convincing.** Before extrinsic scaling the first three levels
-came out at +1.47, +1.50, +1.50 dB — within 0.03 dB of each other despite
+came out at +1.47, +1.50, +1.50 dB â€” within 0.03 dB of each other despite
 completely different code rates, interleaver tables and puncturing patterns.
 An error in the Annex C interleaving or in the puncturing decomposition would
 produce erratic margins across levels, not a flat offset.
@@ -40,7 +40,7 @@ mapping, the soft demapper, and the turbo decoder are mutually consistent and
 perform as the standard requires.
 
 Does not prove: that the frame sync, timing recovery or carrier recovery are
-right — none of those are exercised here. Nor does it prove the scrambler
+right â€” none of those are exercised here. Nor does it prove the scrambler
 phase is right, since encode and decode share the same scrambler.
 
 ## Regression value
@@ -53,7 +53,7 @@ coding chain broke.
 python tests/waterfall.py
 ```
 
-## Real-signal validation — BGAN19.wav, decoded end to end
+## Real-signal validation â€” BGAN19.wav, decoded end to end
 
 The strongest evidence the chain is correct, because it does not depend on any
 of our own assumptions. Decoding 39.4 s of `E:/SDRPPrecordings/BGAN19.wav`
@@ -73,7 +73,7 @@ handshake. Separately, a well-formed HTTP request:
 Neither can arise from noise. A wrong descrambler phase, a wrong interleaver
 or an off-by-one anywhere in the chain destroys them completely.
 
-Both came from **frame block 2 at level H4** — blocks that did not decode at
+Both came from **frame block 2 at level H4** â€” blocks that did not decode at
 all before per-block level search was added.
 
 ### Three findings that changed the design
@@ -121,17 +121,17 @@ essentially all block 0 -- which matches our b0 count of 221 almost exactly.
 python tools/decode_wav.py E:/SDRPPrecordings/BGAN19.wav
 ```
 
-### Locating the AVP — since resolved, see below
+### Locating the AVP â€” since resolved, see below
 
 The first attempt scanned all 8 bit alignments of block 0's payload for the
-`10010|prm-len` tag and matched in 98/98 frames — i.e. it was matching noise,
+`10010|prm-len` tag and matched in 98/98 frames â€” i.e. it was matching noise,
 because a 1-entry AVP is only 2 bytes. Rejected at the time.
 
 It was solved later by anchoring on the confirmed BulletinBoard instead of
 searching for the tag: see "The AVP list" below. The lesson is that a short
 tag needs a known offset to be found, not a better scoring rule.
 
-## The BulletinBoard frame-number check — the decisive test
+## The BulletinBoard frame-number check â€” the decisive test
 
 Everything above validates the decoder against structure we recovered
 ourselves. This one does not: it is a counter maintained by the network, and
@@ -149,7 +149,7 @@ On BGAN19.wav, block 0 at L3, `frame-no` at bit 44:
     0.054     hits expected by chance
 
 Perfect sensitivity, zero false positives. And the 13 hits fall on frames
-37, 54, 71, 88, 156, 173, 275, 292, 309, 360, 377, 411, 445 — **every gap an
+37, 54, 71, 88, 156, 173, 275, 292, 309, 360, 377, 411, 445 â€” **every gap an
 exact multiple of 17**. The BulletinBoard is on a strict 17-frame cycle, which
 is precisely clause 5.4.3.0's "transmitted at regular intervals, but not
 necessarily in every frame". We did not put a 17 anywhere.
@@ -159,7 +159,7 @@ The remaining fields are constant across all 13, as they should be:
     rnc-id 6   net-ver 1   f-bearer 1   bct-id 6
 
 and the BCtPDU header's first and third octets are fixed at 0xc9 / 0xc1. The
-first AVP octet is 0x86 — which is the most common non-zero byte in the entire
+first AVP octet is 0x86 â€” which is the most common non-zero byte in the entire
 capture, exactly as a frequently repeated AVP tag should be.
 
 ### Why the earlier delta test nearly missed it
@@ -167,7 +167,7 @@ capture, exactly as a frequently repeated AVP tag should be.
 Scoring consecutive records by whether the field advanced with the frame gap
 gave only 0.21, because the BulletinBoard is absent from 16 frames in every
 17 and each gap breaks the chain. Testing for a *constant offset* instead is
-immune to absence — missing frames simply do not vote. `tools/find_framenum.py`.
+immune to absence â€” missing frames simply do not vote. `tools/find_framenum.py`.
 
 ### The bit I first called spare was spot-beam-present
 
@@ -190,7 +190,7 @@ Octet 1 bit 6 remains genuinely unexplained. It affects no parsed field.
 The BCtPDU header length of 3 octets is measured, not read from the spec, so
 `bulletin.BCTPDU_HDR_BITS` may not generalise to other PDU types.
 
-## The AVP list — levels read rather than searched
+## The AVP list â€” levels read rather than searched
 
 Clause 5.7.1 allocates BCtAVPType so that "the parameter length can be
 obtained from the lower three bits", i.e. each AVP occupies
@@ -217,15 +217,15 @@ found independently by trial decode:
 
     103 agree, 0 disagree
 
-Two methods with nothing in common — one structural parse of a broadcast
-control message, one brute-force search over ten levels — agreeing on 103
+Two methods with nothing in common â€” one structural parse of a broadcast
+control message, one brute-force search over ten levels â€” agreeing on 103
 blocks. This is what retires open question 8.
 
 ### The network names itself
 
 `plmn-info-len-3` carries `90 11 1f`, identical in all 13. Clause 5.7.34
 defines PLMNInfoParam as `mcc SEQUENCE SIZE(3) OF Digit, mnc SEQUENCE SIZE(3)
-OF Digit` — plain ordered digits, *not* the nibble-swapped 3GPP layout, which
+OF Digit` â€” plain ordered digits, *not* the nibble-swapped 3GPP layout, which
 decodes this to a nonsensical 4-digit MNC. Read straight:
 
     MCC 901, MNC 11 (third digit 0xF = 2-digit MNC)  ->  PLMN 901-11
@@ -238,15 +238,15 @@ decodes this to a nonsensical 4-digit MNC. Read straight:
 The valid-type run extends 10-16 AVPs, longer than the real list: with 95 of
 256 type codes defined, a garbage octet still looks valid ~37% of the time, so
 the walk runs past the end. Only the leading AVPs are trustworthy. The SDU's
-`slength` field would bound it properly, but it sits in octet 1 — the one
-octet known to read anomalously — so it is not yet trusted.
+`slength` field would bound it properly, but it sits in octet 1 â€” the one
+octet known to read anomalously â€” so it is not yet trusted.
 
-## Second capture — does any of this generalise?
+## Second capture â€” does any of this generalise?
 
 Everything above came from one file. Repeating it on
 `BGAN very strong lots of data baseband_1543100000Hz_19-09-04_30-07-2026.wav`
-— different day, different frequency, 512 kHz instead of 192 kHz, no 2x
-upsample needed — reproduces the whole stack.
+â€” different day, different frequency, 512 kHz instead of 192 kHz, no 2x
+upsample needed â€” reproduces the whole stack.
 
     symbol clock          +1.1 ppm            (BGAN19: -0.2 ppm)
     blocks decoded        785/1984  39.6%     (BGAN19: 1541/3928  39.2%)
@@ -264,10 +264,10 @@ Fields that should be invariant are, and fields that should differ do:
     rnc-id / bct-id          29 / 9          vs 6 / 6
 
 `spot-beam-id` stays 134 while `rnc-id` changes. (I first read that as a
-physical necessity — same receiver location, same beam. It is not; see the
+physical necessity â€” same receiver location, same beam. It is not; see the
 correction under the third capture below.)
 
-Recovered payload is coherent application traffic — dozens of consistently
+Recovered payload is coherent application traffic â€” dozens of consistently
 named ESET Remote Administrator agent module paths
 (`/era-agent-sta/mod_039_confeng2_era_2439/em039_a64_n*.dll.nup`). The payload
 is 5.7% zeros here against 14.6% on BGAN19, matching the operator's own
@@ -291,7 +291,7 @@ fix; a PLL fitting a period would still be wrong.
 
 ### Third capture, and a correction
 
-`BGAN 2 at once ...1547298000Hz...` (512 kHz, 12 s) is a weak case — two
+`BGAN 2 at once ...1547298000Hz...` (512 kHz, 12 s) is a weak case â€” two
 carriers overlap in band, the channeliser sees a blend, and only 92/1184
 blocks decode (7.8%). Even so the control plane parses:
 
@@ -328,7 +328,7 @@ tested and disproved first, and each disproof was itself the clue.
 
 ### What it was
 
-`recv.extract_symbols` computes `pos = tau0 + period*arange(n)` — one timing
+`recv.extract_symbols` computes `pos = tau0 + period*arange(n)` â€” one timing
 phase, chosen at t=0, applied to all 39 seconds.
 
 We already knew this recording drops samples (that is the offset staircase).
@@ -354,8 +354,8 @@ all looking in the same wrong dimension.
 An estimator trap on the way: per-frame EVM-to-nearest-constellation-point
 *saturates*. Random symbols still land within half a grid spacing, so the
 metric bottoms out near 0.4 and reports ~8 dB no matter how bad the frame is.
-That produced an apparent contradiction — failing frames "at 8.34 dB" when
-block 0 (always L3) needs only 3.22 dB — which was an artifact, not a finding.
+That produced an apparent contradiction â€” failing frames "at 8.34 dB" when
+block 0 (always L3) needs only 3.22 dB â€” which was an artifact, not a finding.
 
 ### The proof
 
@@ -374,13 +374,13 @@ makes it conclusive: this is a timing-phase effect, not a lucky search.
 ### The fix
 
 `survey_taus` evaluates 8 timing phases per frame and picks the best by
-differential-UW correlation — no trial decoding needed, because the metric
+differential-UW correlation â€” no trial decoding needed, because the metric
 tracks timing closely (38 -> 81 on a dead run at the right phase).
 `decode_capture` then decodes each frame at its own phase, iterating one phase
 at a time so memory stays flat. `--ntau 1` restores the old behaviour.
 
 Unexpected bonus: the chosen phase wanders continuously, not only at dropouts
-— all 8 phases are used roughly evenly (`[75, 69, 63, 56, 43, 47, 55, 83]`).
+â€” all 8 phases are used roughly evenly (`[75, 69, 63, 56, 43, 47, 55, 83]`).
 That is the residual -0.3 ppm clock error, worth about half a symbol across
 39 s. Per-frame timing absorbs it for free.
 
@@ -395,7 +395,7 @@ That is the residual -0.3 ppm clock error, worth about half a symbol across
     printable runs               184        830
 
 The independent checks scale exactly as they should, which is the real
-evidence — a decoder inventing blocks would not:
+evidence â€” a decoder inventing blocks would not:
 
     BulletinBoards found          13         28   (of 29 possible)
     frame-no offset             2008       2008   (unchanged)
@@ -482,3 +482,174 @@ So the BCtPDU header is understood and the first SDU is located, but SDU
 chaining beyond the first is not. The rule for it is in TS 102 744-3-3/-3-4
 (Bearer Connection Layer), which turned out to be freely available from
 ETSI after all -- see docs/OPEN_QUESTIONS.md item 6.
+
+---
+
+## Calibrating the block-acceptance test (Aug 2026)
+
+A block is accepted only if **both** hold: the re-encoded parity agrees with
+the demapper's hard decisions above a threshold, **and** `verify_block`'s
+likelihood ratio clears its margin. Neither alone is sufficient, and until
+now the threshold was in the wrong place. This is the calibration.
+
+### Positives: ground truth from the synthetic generator
+
+`tools/make_test_iq.py` saves the transmitted payload bits, so a decode can be
+scored bit-exactly rather than "it converged". Seven captures, L3, 6 s each,
+Es/N0 5 to 12 dB, 20 frames per capture, all 8 blocks, all 10 candidate
+levels. A try is a true positive only when the level is the transmitted one
+*and* the descrambled bits match the truth array exactly.
+
+    Es/N0   correct blocks   min agreement   median   LR passes
+      5 dB       159            0.7585       0.7992     100%
+      6 dB       160            0.7879       0.8246     100%
+      7 dB       160            0.8191       0.8518     100%
+      8 dB       160            0.8457       0.8770     100%
+      9 dB       160            0.8726       0.9010     100%
+     10 dB       160            0.8967       0.9240     100%
+     12 dB       160            0.9397       0.9631     100%
+
+Agreement tracks SNR, because it is measured against hard decisions that are
+themselves error-prone. That is exactly why a fixed 0.90 fails at low SNR.
+
+### Negatives: blocks that cannot possibly decode
+
+Three kinds, all drawn from the captures themselves so the noise is theirs:
+frame offset displaced by MOS/3, offset shifted by 7 symbols, and circular
+Gaussian noise at matched power. Run over both the synthetic set and five
+real captures, all 10 levels each.
+
+    synthetic negatives    21281 tries   max agreement 0.5895
+    real-capture negatives 16000 tries   max agreement 0.6023
+    pooled                 37281 tries   max agreement 0.6023
+
+The false distribution is centred near 0.5 and its ceiling barely moves with
+SNR, because a wrong decode is largely uncorrelated with the hard decisions.
+The true distribution moves a lot. So the threshold belongs just above the
+false ceiling, not somewhere in the middle of the true one.
+
+### Result
+
+    correct decodes, minimum over 1119 blocks     0.7585
+    impossible tries, maximum over 37281 tries    0.6023
+
+Nothing lies between. `ACCEPT_AGREEMENT = 0.70` sits in the gap, 0.098 above
+the observed false ceiling and 0.059 below the observed true floor.
+
+    threshold   recall of correct blocks   false accepts / 37281
+       0.90            36.5%                      0
+       0.85            65.1%                      0
+       0.80            91.5%                      0
+       0.70           100.0%                      0
+       0.62           100.0%                      0
+
+Per Es/N0, 0.90 against 0.70:
+
+           5dB   6dB   7dB   8dB   9dB  10dB  12dB
+    0.90    0%    0%    0%    0%   56%   99%  100%
+    0.70  100%  100%  100%  100%  100%  100%  100%
+
+### Why the likelihood ratio cannot replace it
+
+On the same negatives, `verify_block` alone accepts 2.6-3.6% of tries at every
+SNR. Across ten candidate levels that is a false level on roughly a quarter of
+all blocks. Paired with the agreement threshold it gives zero false accepts on
+all 37281. The pairing is the test; neither half is.
+
+### Regression value
+
+Re-run before changing `ACCEPT_AGREEMENT`. The scripts are throwaway but the
+recipe is not: generate labelled captures across Es/N0, decode every block at
+every level, label against the truth array, and pair each positive set with
+negatives drawn from the same captures. A threshold moved without that is a
+fudge, whichever direction it moves.
+
+### The extra blocks corroborate on checks that share nothing with the test
+
+The calibration above is ground truth, but it is the same *kind* of test as
+the one being changed. These two are not: both depend on the network's own
+internal consistency, and the decoder never uses either as an input.
+
+  * **BulletinBoard frame-no.** A 12-bit counter the network advances once per
+    80 ms frame, so `(frame_no - frame_index) mod 4096` must be constant.
+  * **AVP-predicted coding levels.** Block 0 carries a
+    ForwardBearerCodeRateParam naming the levels of blocks 1-7. Agreement with
+    the level trial decode settled on is a prediction, not a measurement.
+
+Over 20 s per capture, at the old threshold and the new:
+
+    capture      thr    blocks     BulletinBoard frame-no      AVP levels
+    1543.100b   0.90   1904/1984   15/244 on-cycle, period 17   1451 / 0
+    1543.100b   0.70   1904/1984   15/244 on-cycle, period 17   1451 / 0
+    1543.100a   0.90   1921/1984   14/247 on-cycle, period 17   1315 / 0
+    1543.100a   0.70   1921/1984   14/247 on-cycle, period 17   1315 / 0
+    1553.500    0.90     15/1984   too few to test                 0 / 0
+    1553.500    0.70   1721/1984   13/232 on-cycle, period 17    747 / 0
+    1547.298    0.90    331/1984    5/143 on-cycle, period 17     125 / 0
+    1547.298    0.70   1887/1984    8/248 on-cycle, period 17    1441 / 0
+
+On-cycle hits expected by chance are 0.03-0.06, so a single one is already
+conclusive and these are 5 to 15, all on a strict 17-frame period.
+
+The two captures that gain blocks gain 2188 further AVP agreements with **zero**
+disagreements, and 1553.500 goes from having no measurable control plane at all
+to a clean 17-frame BulletinBoard cycle. The two captures that gain nothing --
+because at 12 dB every correct block already cleared 0.90 -- are bit-identical
+on every column. A decoder manufacturing 1706 extra blocks does not do that.
+
+Content is consistent too. 1553.500 decodes to **92.8% zero bytes**, 1633 of
+1721 blocks at L3: an idle bearer sending filler, the same signature as the
+all-zero L3 blocks already seen on BGAN19. False decodes emit uniform random
+bytes, which are ~0.4% zeros. 1547.298 is the opposite, 0.7% zeros and high
+entropy, consistent with encrypted user traffic -- and it is the 1441/0 AVP
+agreement rather than the entropy that establishes those blocks are real.
+
+### Full-capture regression, old behaviour against new
+
+Same code path, same 12 s window, one process. OLD is no carrier-offset
+correction, acceptance threshold 0.90, single-phase carrier probe.
+
+    capture               OLD           NEW      residual offset   what fixed it
+    1543.100b (control)   94.8%       94.9%        +205.2 Hz    nothing needed
+    1543.100a              0.0%       96.5%        -860.6 Hz    carrier offset
+    1553.500          nocarrier       82.9%       -1564.7 Hz    all three
+    1550.398               0.0%       34.2%        -425.1 Hz    threshold
+    1547.298              15.8%       92.7%        +103.9 Hz    threshold
+    BGAN9             nocarrier       92.6%       -2418.5 Hz    carrier offset
+    BGAN10                 0.0%       88.2%       -2532.4 Hz    carrier offset
+    BGAN15            nocarrier   nocarrier                     unchanged
+    1532.200          nocarrier   nocarrier                     correct: 33.6 kBd only
+
+Unique-word EVM before and after correction, same order: 0.199->0.169,
+0.464->0.146, 1.007->0.305, 0.414->0.353, 0.263->0.261, 2.029->0.193,
+2.286->0.201.
+
+Three things worth reading off this table:
+
+  * The **192 kHz captures carry the largest offsets** (-2418, -2532 Hz), and
+    their UW EVM reads 2.0-2.3 before correction. A carrier filling the whole
+    band gives the centroid no symmetric shoulders to balance, so those files
+    are the worst case for the old estimator, not merely the noisiest.
+  * The fixes are **separable**. 1543.100a is carrier offset alone: 1921/1984
+    at either threshold once corrected. 1547.298 is threshold alone, its
+    offset being +103.9 Hz with EVM essentially unmoved. 1553.500 needs all
+    three, scoring 15/1984 at threshold 0.90 even with its carrier fixed.
+  * **1532.200 still reports nocarrier**, which is correct -- it holds four
+    33.6 kBd F80T1X-4B carriers and no 151.2 kBd bearer at all. The carrier
+    probe escalation did not manufacture one, which was the risk in letting a
+    rejected candidate have a second look.
+
+Synthetic captures, all 9 s, old against new:
+
+    L3 12 dB          888/888  ->  888/888   (100%)
+    L3 30 dB clean    888/888  ->  888/888   (100%)
+    H6 16 dB          888/888  ->  888/888   (100%)
+    R 12 dB +100 kHz  888/888  ->  888/888   (100%)
+    L3 4 dB threshold   0/888  ->  735/888   ( 82.8%)
+
+The 4 dB file is the strongest single result here, because it has ground
+truth and sits **below** the 5-12 dB range the threshold was calibrated over.
+All 735 accepted blocks are **bit-exact against the transmitted payload, zero
+wrong**, and all 735 are at the transmitted level L3. So the threshold does
+not start manufacturing blocks as soon as it leaves its calibration range;
+the decoder simply stops finding them.

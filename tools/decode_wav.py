@@ -29,13 +29,43 @@ from collections import Counter
 from scipy.signal import resample_poly
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from bgan import spec, mod, recv, tx, bctrl
+from bgan import spec, mod, recv, tx, bctrl, carrier
 from bgan import decoder as dec
 from bgan.pipeline import verify_block
 from bgan.turbo import map_to_symbols, turbo_encode
 
 MOS, STEP, UWLEN, DAT, GRP = 12096, 137, 40, 136, 11
 NL_ = chr(10)
+
+# Parity-agreement threshold for accepting a block, used together with the
+# likelihood-ratio check in pipeline.verify_block. Never either alone.
+#
+# This was 0.90, which is inside the distribution of *correct* decodes rather
+# than above the distribution of wrong ones, and it cost almost everything
+# below 9 dB. Calibrated against ground truth from the synthetic generator at
+# Es/N0 5..12 dB, plus impossible blocks (wrong frame offset, shifted offset,
+# and Gaussian noise at matched power) drawn from both synthetic and real
+# captures:
+#
+#     correct decodes, minimum agreement over 1119 blocks     0.7585
+#     impossible tries, maximum agreement over 37281 tries    0.6023
+#
+# Nothing at all falls between those two, so the threshold goes in the gap.
+# Recall of genuinely correct blocks, by Es/N0:
+#
+#            5dB   6dB   7dB   8dB   9dB  10dB  12dB
+#     0.90    0%    0%    0%    0%   56%   99%  100%
+#     0.70  100%  100%  100%  100%  100%  100%  100%
+#
+# with zero false accepts at 0.70 in either negative set. The old value was
+# not merely conservative: it rejected every correct block below 9 dB, which
+# is where three of the captures on hand sit.
+#
+# Do not move this without re-running that calibration. Loosening a threshold
+# because it is rejecting frames you believe in is how false positives get
+# manufactured; loosening it against a labelled negative set of tens of
+# thousands of impossible blocks is not the same operation.
+ACCEPT_AGREEMENT = 0.70
 
 
 class NoCarrier(Exception):
@@ -55,45 +85,71 @@ class NoCarrier(Exception):
 
 # --- front end ---------------------------------------------------------------
 
-def probe_centre(x, sr, centre, sps=4, nframes=6):
+def probe_centre(x, sr, centre, sps=4, nframes=6, ntau=1):
     """Cheap decodability probe for one candidate carrier. No turbo decoding.
 
     Returns (metric, floor, rs_ppm, level, refined_centre). `metric` is the median
     differential-UW correlation over a few frames; `floor` is the same
     statistic at deliberately wrong offsets, which calibrates what noise looks
     like in this capture rather than against a hardcoded number.
+
+    `ntau` timing phases are tried and the best taken per frame. At ntau=1
+    this probe inherits exactly the bug survey_taus exists to fix: one global
+    timing phase for the whole capture, which a recording with dropped
+    samples invalidates. Measured on 1553.500, whose metric by window length
+    reads 54.2, 49.0, 50.8, **22.7**, 49.3, 44.1 at 6/8/10/12/16/20 s -- the
+    12 s window alone lands on a phase that is wrong for the frames probed,
+    and the carrier is rejected outright as "no F80T4.5X-8B found". Nothing
+    about the signal changes at 12 s; only the phase the probe happens to sit
+    on does.
+
+    Left at ntau=1 by default because it costs 8x and only matters when a
+    candidate is about to be rejected. pick_carrier escalates the failures.
     """
     try:
         y, fs, c = recv.channelize(x, sr, sps=sps, centre=centre)
         rs, tau0 = recv.estimate_symbol_clock(y, fs)
-        s = symbols_at(y, fs, rs, tau0, np.complex64)
     except Exception:
         return 0.0, 1.0, float("inf"), None, centre
     if not (np.isfinite(rs) and np.isfinite(tau0) and rs > 0):
         return 0.0, 1.0, float("inf"), None, centre
-    d = np.empty_like(s)
-    d[0] = 0
-    d[1:] = s[1:]*np.conj(s[:-1])
     pats = {lv: diff_uw(lv) for lv in spec.LEVELS_F80T45X8B}
+    period = fs/rs
 
-    nfr = min(nframes, len(s)//MOS - 1)
-    if nfr < 2:
+    best = None
+    for k in range(max(1, ntau)):
+        try:
+            s = symbols_at(y, fs, rs, tau0 + (k/max(1, ntau))*period,
+                           np.complex64)
+        except Exception:
+            continue
+        d = np.empty_like(s)
+        d[0] = 0
+        d[1:] = s[1:]*np.conj(s[:-1])
+
+        nfr = min(nframes, len(s)//MOS - 1)
+        if nfr < 2:
+            continue
+        hits, floor, lvls = [], [], []
+        for f in range(nfr):
+            got = _corr(d, 1 + f*MOS, MOS, pats)
+            if got:
+                hits.append(got[0])
+                lvls.append(got[2])
+            # deliberately wrong offset, to calibrate this capture's floor
+            off = _corr(d, 1 + f*MOS + MOS//3, MOS//8, pats)
+            if off:
+                floor.append(off[0])
+        if not hits:
+            continue
+        m = float(np.median(hits))
+        if best is None or m > best[0]:
+            best = (m, float(np.median(floor) if floor else 1.0),
+                    Counter(lvls).most_common(1)[0][0])
+    if best is None:
         return 0.0, 1.0, float("inf"), None, c
-    hits, floor, lvls = [], [], []
-    for f in range(nfr):
-        got = _corr(d, 1 + f*MOS, MOS, pats)
-        if got:
-            hits.append(got[0])
-            lvls.append(got[2])
-        off = _corr(d, 1 + f*MOS + MOS//3, MOS//8, pats)   # deliberately wrong
-        if off:
-            floor.append(off[0])
-    if not hits:
-        return 0.0, 1.0, float("inf"), None, c
-    lv = Counter(lvls).most_common(1)[0][0]
     ppm = (rs - spec.F80T45X8B.rs)/spec.F80T45X8B.rs*1e6
-    return (float(np.median(hits)), float(np.median(floor) if floor else 1.0),
-            float(ppm), lv, float(c))
+    return best[0], best[1], float(ppm), best[2], float(c)
 
 
 def pick_carrier(x, sr, sps=4, ncand=4, min_ratio=1.8, max_ppm=50.0,
@@ -123,10 +179,24 @@ def pick_carrier(x, sr, sps=4, ncand=4, min_ratio=1.8, max_ppm=50.0,
     for centre, power in cands:
         m, fl, ppm, lv, refined = probe_centre(x, sr, centre, sps)
         ratio = m/max(fl, 1e-9)
+        retried = False
+        # A candidate about to be rejected gets a second look across all
+        # timing phases before it is thrown away. The one-phase probe is not
+        # reliable enough to condemn a carrier on: it rejected a real one
+        # outright at a 12 s window and accepted the same carrier at 6, 8,
+        # 10, 16 and 20 s. Only failures pay the 8x, so captures that already
+        # work are unaffected.
+        if ratio < min_ratio and abs(ppm) <= max_ppm:
+            m2, fl2, ppm2, lv2, refined2 = probe_centre(
+                x, sr, centre, sps, ntau=TAU_STEPS)
+            r2 = m2/max(fl2, 1e-9)
+            retried = True
+            if r2 > ratio:
+                m, fl, ppm, lv, refined, ratio = m2, fl2, ppm2, lv2, refined2, r2
         ok = ratio >= min_ratio and abs(ppm) <= max_ppm
         rows.append(dict(centre=centre, refined=refined, power=power,
                          metric=m, floor=fl, ratio=ratio, ppm=ppm,
-                         level=lv, ok=ok))
+                         level=lv, ok=ok, retried=retried))
 
     # Deduplicate on the REFINED centre, not the raw one. The suppression
     # guard in find_carriers sits one bandwidth from each peak, so a single
@@ -389,7 +459,61 @@ def survey_taus(y, fs, rs_est, tau0, ntau=TAU_STEPS, win=320, levels=None):
     return best
 
 
-def survey(path, secs=None, ntau=TAU_STEPS, progress=None, offset=0.0):
+def correct_cfo(y, fs, rs_est, tau0, ntau, tau_idx, offs, lvls, enabled=True):
+    """Remove the residual carrier offset the spectral centroid left behind.
+
+    Returns (y, info). Applied only when it actually reduces unique-word
+    EVM, measured on this capture -- a self-check rather than a threshold,
+    so a capture that does not need it cannot be harmed by it.
+
+    Framing and timing are not disturbed: at the offsets seen here the
+    differential UW correlation shifts by hundredths of a radian, and
+    re-running survey_taus afterwards was measured to change nothing on any
+    capture. So the caller keeps its existing tau_idx and offs.
+    """
+    st = dict(cfo_hz=0.0, cfo_q=0.0, uw_evm=float("nan"),
+              uw_evm_before=float("nan"), cfo_applied=False)
+    if not enabled:
+        return y, st
+    V, A = carrier.uw_observations(y, fs, rs_est, tau0, ntau, tau_idx, offs,
+                                   lvls)
+    if len(V) < carrier.MIN_FRAMES:
+        return y, st
+    st["uw_evm_before"] = st["uw_evm"] = carrier.uw_evm(V, A)
+    hz, q = carrier.estimate_cfo(V, A, rs_est)
+    st["cfo_q"] = q
+    if not hz:
+        return y, st
+    yc = carrier.derotate(y, fs, hz)
+    V2, A2 = carrier.uw_observations(yc, fs, rs_est, tau0, ntau, tau_idx,
+                                     offs, lvls)
+    e2 = carrier.uw_evm(V2, A2)
+    if not (e2 < st["uw_evm_before"]):
+        return y, st
+    st.update(cfo_hz=hz, uw_evm=e2, cfo_applied=True)
+    return yc, st
+
+
+def describe_cfo(info):
+    """One line on the residual carrier offset, for the CLI and the GUI.
+
+    Worth printing even when nothing was corrected: unique-word EVM is the
+    only figure here that predicts the failure this stage exists for. The
+    UW correlation metric does not -- it stays healthy at 60-72 on captures
+    that decode nothing, because it is differential.
+    """
+    e = info.get("uw_evm", float("nan"))
+    if not info.get("cfo_applied"):
+        return (f"carrier offset: none applied   UW EVM {e:.3f}"
+                if np.isfinite(e) else "carrier offset: not measured")
+    return (f"carrier offset: {info['cfo_hz']:+.1f} Hz removed   "
+            f"UW EVM {info['uw_evm_before']:.3f} -> {e:.3f}"
+            + ("   (was past the 552 Hz pilot-unwrap limit)"
+               if abs(info["cfo_hz"]) > 552.0 else ""))
+
+
+def survey(path, secs=None, ntau=TAU_STEPS, progress=None, offset=0.0,
+           cfo_enabled=True):
     """Fast scan: what is on this carrier and where, without decoding.
 
     Runs the front end and the timing/framing search but no turbo decoding,
@@ -406,6 +530,14 @@ def survey(path, secs=None, ntau=TAU_STEPS, progress=None, offset=0.0):
     98.5%. Treat it as "at least this much", and re-check it against a real
     decode before trusting it on a link that behaves differently.
 
+    It is now more conservative still, and blind in one direction. The
+    forecast is built from the differential UW metric, which is exactly the
+    statistic that cannot see a residual carrier offset -- captures scoring
+    60-72 used to decode nothing at all. Read `uw_evm` alongside it: ~0.17
+    on captures that decode, ~0.45 on captures that do not. The forecast also
+    predates the ACCEPT_AGREEMENT recalibration, so real yields on weak
+    captures now run well above it.
+
     Cost: ~16 s for a 39 s capture, against ~145 s to decode the same file,
     so roughly a ninth of the price of finding out the hard way.
 
@@ -415,6 +547,9 @@ def survey(path, secs=None, ntau=TAU_STEPS, progress=None, offset=0.0):
     if progress:
         progress(0.5, "scanning framing and timing")
     tau_idx, offs, lvls, mets = survey_taus(y, fs, rs_est, tau0, ntau)
+    y, cfo = correct_cfo(y, fs, rs_est, tau0, ntau, tau_idx, offs, lvls,
+                         enabled=cfo_enabled)
+    info.update(cfo)
     s = symbols_at(y, fs, rs_est, tau0)
     m4 = recv.timing_quality(s)
     info.update(m4=m4, esn0=recv.esn0_from_m4(m4), nframes=len(offs))
@@ -448,8 +583,10 @@ def survey(path, secs=None, ntau=TAU_STEPS, progress=None, offset=0.0):
     return info, (tau_idx, offs, lvls, mets)
 
 
-def decode_capture(path, secs=None, thr=0.90, level=None, search_levels=True,
-                   ntau=TAU_STEPS, progress=None, offset=0.0, centre=None):
+def decode_capture(path, secs=None, thr=ACCEPT_AGREEMENT, level=None,
+                   search_levels=True,
+                   ntau=TAU_STEPS, progress=None, offset=0.0, centre=None,
+                   cfo_enabled=True):
     """Full chain with per-frame timing recovery. Returns (records, info).
 
     records: list of (frame, block, level, agreement, payload_bits)
@@ -459,6 +596,9 @@ def decode_capture(path, secs=None, thr=0.90, level=None, search_levels=True,
     if progress:
         progress(0.10, "searching timing phases")
     tau_idx, offs, lvls, mets = survey_taus(y, fs, rs_est, tau0, ntau)
+    y, cfo = correct_cfo(y, fs, rs_est, tau0, ntau, tau_idx, offs, lvls,
+                         enabled=cfo_enabled)
+    info.update(cfo)
     nfr = len(offs)
     info["nframes"] = nfr
     info["tau_hist"] = np.bincount(tau_idx, minlength=ntau).tolist()
@@ -548,10 +688,10 @@ class LevelPredictor:
 
     def order(self, b, hint=None):
         out = []
-        if hint:
+        if hint and hint in self.levels:
             out.append(hint)
         p = self.last.get(b)
-        if p and p not in out:
+        if p and p in self.levels and p not in out:
             out.append(p)
         for lv, _ in self.seen[b].most_common():
             if lv not in out:
@@ -606,17 +746,37 @@ def levels_from_block0(payload_bits, uw_level="L3", nblocks=8):
     entries = bctrl.parse_fwd_code_rate(by[p:p + 1 + n])
     if not entries:
         return None
-    return bctrl.resolve_block_levels(uw_level, entries, nblocks)
+    got = bctrl.resolve_block_levels(uw_level, entries, nblocks)
+    # Table 5.20 spans L8..H6, but this bearer defines only ten of those and
+    # we hold Annex C tables for exactly those ten. A hint naming any other
+    # level is a misparse -- the tag test above accepts ~8 of 256 random
+    # bytes, so a block whose payload is not really a BCtPDU will produce
+    # them. Blank those entries so the block is searched instead.
+    #
+    # Passing one through used to abort the whole capture: tx.tables("L7")
+    # raises FileNotFoundError on the missing annex file, from inside the
+    # per-block decode loop, killing every remaining frame. Reproduced on
+    # four of the five synthetic captures, whose payloads are random bits by
+    # construction and so hit this readily.
+    return [lv if lv in spec.LEVELS_F80T45X8B else None for lv in got]
 
 
-def decode_block_fast(blk, b, pred, thr=0.90, hint=None):
+def decode_block_fast(blk, b, pred, thr=ACCEPT_AGREEMENT, hint=None):
     """Trial-decode in predicted order, stopping at the first accepted level.
 
-    Early stopping is safe here for a specific measured reason: across ~480
-    block-tries at 10 levels each, no block ever passed at two levels. There
-    is no second candidate to lose by stopping. The likelihood-ratio check is
-    required as well as the parity threshold, so a stop needs two independent
-    reasons to believe the level is right.
+    Early stopping is safe here for a specific measured reason: no block has
+    ever passed at two levels, so there is no second candidate to lose by
+    stopping. Originally measured over ~480 block-tries; re-confirmed at the
+    lower threshold over 22400 tries with ground truth, where accepting at a
+    level other than the transmitted one happened zero times. The
+    likelihood-ratio check is required as well as the parity threshold, so a
+    stop needs two independent reasons to believe the level is right.
+
+    Both conditions are load-bearing. The likelihood ratio cannot stand on
+    its own: on impossible blocks it accepts ~3% of tries, which over ten
+    levels is a false level for roughly a quarter of all blocks. And the
+    agreement threshold cannot stand on its own either, since a wrong decode
+    still scores ~0.5. See ACCEPT_AGREEMENT for where the line goes.
 
     Returns (bits, level, agreement) or (None, None, 0.0).
     """
@@ -748,7 +908,7 @@ def decode_segmented(path, secs=None, segment=SEGMENT_SECS, progress=None,
              np.concatenate(met_all)))
 
 
-def decode_block_anylevel(blk, thr=0.90, levels=None):
+def decode_block_anylevel(blk, thr=ACCEPT_AGREEMENT, levels=None):
     """Identify the coding level by trial decode. Returns (bits, level, ag).
 
     Only block 0's level is signalled by the unique word. Blocks 1..7 carry it
@@ -762,6 +922,12 @@ def decode_block_anylevel(blk, thr=0.90, levels=None):
     Measured on BGAN19: this lifts blocks 1-7 from 0-14% decoded (at the
     UW-signalled level) to 75-93%. The levels really do vary per frame, which
     is exactly the AVP doing its job.
+
+    Note this path uses the parity threshold WITHOUT the likelihood-ratio
+    check, unlike decode_block_fast. ACCEPT_AGREEMENT = 0.70 still clears the
+    measured false-accept ceiling of 0.6023 on its own, but by 0.098 rather
+    than with a second independent test behind it. Superseded by
+    decode_block_fast and currently unused; prefer that.
 
     Returns level=None if zero or more than one level passes.
     """
@@ -806,7 +972,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path")
     ap.add_argument("--secs", type=float, default=None)
-    ap.add_argument("--thr", type=float, default=0.90)
+    ap.add_argument("--thr", type=float, default=ACCEPT_AGREEMENT,
+                    help="parity-agreement threshold; see ACCEPT_AGREEMENT")
     ap.add_argument("--level", default=None, help="force coding level")
     ap.add_argument("--segment", type=float, default=0.0,
                     help="EXPERIMENTAL: decode in N-second segments, "
@@ -819,6 +986,10 @@ def main():
     ap.add_argument("--ntau", type=int, default=TAU_STEPS,
                     help="timing phases to search per frame (1 = old "
                          "single-phase behaviour)")
+    ap.add_argument("--no-cfo", dest="cfo", action="store_false",
+                    help="skip residual carrier-offset correction. It is "
+                         "applied only when it lowers unique-word EVM, so "
+                         "this is for diagnosis rather than safety.")
     ap.add_argument("--no-search-levels", dest="search_levels",
                     action="store_false",
                     help="use the UW level for all 8 blocks (much faster, "
@@ -835,7 +1006,8 @@ def main():
         t0 = time.time()
         try:
             info, (tau_idx, offs, lvls, mets) = survey(
-                a.path, secs=a.secs, ntau=a.ntau, progress=prog)
+                a.path, secs=a.secs, ntau=a.ntau, progress=prog,
+                cfo_enabled=a.cfo)
         except NoCarrier as exc:
             print()
             report_no_carrier(a.path, exc.rows, a.secs)
@@ -848,6 +1020,7 @@ def main():
               f"({info['ppm']:+.2f} ppm)")
         print(f"  M4/M2^2 {info['m4']:.3f} -> Es/N0 {info['esn0']:.1f} dB   "
               f"{info['nframes']} frames")
+        print("  " + describe_cfo(info))
         print("  unique words seen: " +
               ", ".join(f"{k} x{v}" for k, v in
                         sorted(info["uw_levels"].items(),
@@ -876,7 +1049,7 @@ def main():
         recs, info, (tau_idx, offs, lvls, mets) = runner(
             a.path, secs=a.secs, thr=a.thr, level=a.level,
             search_levels=a.search_levels, ntau=a.ntau, progress=prog,
-            **extra)
+            cfo_enabled=a.cfo, **extra)
     except NoCarrier as exc:
         print()
         report_no_carrier(a.path, exc.rows, a.secs)
@@ -887,6 +1060,7 @@ def main():
           f"({info['ppm']:+.1f} ppm)")
     print(f"  M4/M2^2 {info['m4']:.3f} -> Es/N0 {info['esn0']:.1f} dB   "
           f"{info['nframes']} frames")
+    print("  " + describe_cfo(info))
 
     rel = offs - np.arange(len(offs))*MOS
     steps = np.flatnonzero(np.diff(rel) | np.diff(tau_idx)) + 1

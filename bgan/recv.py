@@ -209,13 +209,49 @@ def _cubic(y, i, mu):
     return ((c3*mu + c2)*mu + c1)*mu + c0
 
 
-def extract_symbols(y, fs, rs_est, tau0):
-    """Sample y at the symbol instants using cubic interpolation."""
+def symbol_times(y, fs, rs_est, tau0):
+    """Sample positions of the symbol instants, in the order and with the
+    clipping that extract_symbols applies.
+
+    Split out so that anything needing to know *where* symbol i came from
+    cannot drift from what extract_symbols actually did. The head clipping is
+    the subtle part: when tau0 <= 1 the first instant is dropped, so symbol i
+    then sits at tau0 + (i+1)*period. Whether that happens depends on the
+    timing phase, i.e. on roughly half of captures and on some of the eight
+    phases survey_taus tries within a single capture. Rederiving the
+    positions as tau0 + i*period looks obviously right and is one symbol out
+    whenever the drop occurs -- it cost the equaliser a whole debugging pass,
+    where the fit quietly absorbed the shift as a four-sample group delay.
+    """
     period = fs/rs_est
     n = int((len(y)-4)/period) - 1
     pos = tau0 + period*np.arange(n)
-    keep = (pos > 1) & (pos < len(y)-3)
-    pos = pos[keep]
+    return pos[(pos > 1) & (pos < len(y)-3)]
+
+
+def symbol_phase(y, fs, rs_est, tau0):
+    """(first, period) such that symbol j sits at tau0 + (j + first)*period.
+
+    The O(1) form of symbol_times, for callers that want a few positions
+    rather than all of them: the unique-word estimators need 40 per frame,
+    and the full table is ~72 MB per timing phase on a 60 s capture, times
+    the eight phases survey_taus searches.
+
+    `first` is derived with the same `> 1` predicate symbol_times uses rather
+    than a rederived formula, because the whole point of both functions is
+    that the head clipping must not be guessed at.
+    """
+    period = fs/rs_est
+    probe = tau0 + period*np.arange(8)
+    kept = np.flatnonzero(probe > 1)
+    if not len(kept):
+        raise ValueError("timing phase drops more than 8 leading symbols")
+    return int(kept[0]), period
+
+
+def extract_symbols(y, fs, rs_est, tau0):
+    """Sample y at the symbol instants using cubic interpolation."""
+    pos = symbol_times(y, fs, rs_est, tau0)
     i0 = np.floor(pos).astype(np.int64)
     return _cubic(y, i0, pos-i0)
 
