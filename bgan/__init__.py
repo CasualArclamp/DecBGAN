@@ -41,17 +41,26 @@ repository root, `work/` and `annex/`.
 """
 
 # VERSION at the repository root is the source of truth, so that the update
-# check can compare against one short file rather than parsing source. The
-# literal below is only reached when that file is absent -- a vendored copy
-# of the package without the repository around it.
+# check can compare against one short file rather than parsing source, and so
+# that CI can bump one line.
+#
+# UNKNOWN_VERSION is deliberately NOT a release number. It is only reached
+# when VERSION is absent -- a vendored copy of the package with no repository
+# around it -- and such a copy cannot update itself anyway (update.can_update
+# refuses a non-checkout). A stale literal here would claim to be a release it
+# is not, and would be one more thing the version bump has to keep in step, so
+# it says "unknown" instead and never needs touching.
+UNKNOWN_VERSION = "0.0.0+unknown"
+
+
 def _read_version():
     from pathlib import Path
     try:
         v = (Path(__file__).resolve().parent.parent
              / "VERSION").read_text(encoding="utf-8").strip()
-        return v or "0.4.0"
+        return v or UNKNOWN_VERSION
     except OSError:
-        return "0.4.0"
+        return UNKNOWN_VERSION
 
 
 __version__ = _read_version()

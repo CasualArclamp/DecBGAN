@@ -1,0 +1,89 @@
+name: Bump version on merge
+
+# Fires once per pull request that actually merged into main. `closed` also
+# fires for a PR that was closed without merging, hence the `merged` check in
+# the job condition -- without it, abandoning a PR would still bump.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+# Two PRs merged moments apart would otherwise race and one push would be
+# rejected. Serialise them, and do NOT cancel an in-flight run: a cancelled
+# bump is a version silently skipped.
+concurrency:
+  group: version-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    # The repository default for GITHUB_TOKEN is read-only, so the write scope
+    # is requested here rather than relied on.
+    permissions:
+      contents: write
+    if: >-
+      github.event.pull_request.merged == true &&
+      !contains(github.event.pull_request.labels.*.name, 'no-version-bump')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # A shallow clone cannot rebase onto whatever landed while this ran.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Work out and apply the new version
+        id: bump
+        env:
+          # Labels via env, not string-interpolated into the shell: a label is
+          # attacker-controllable text on a fork PR and must never reach a
+          # command line.
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          old=$(cat VERSION)
+          python tools/bump_version.py --labels "$LABELS"
+          new=$(cat VERSION)
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          OLD: ${{ steps.bump.outputs.old }}
+          NEW: ${{ steps.bump.outputs.new }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- VERSION; then
+            echo "VERSION unchanged, nothing to push"
+            exit 0
+          fi
+          git add VERSION
+          # [skip ci] so the bump commit does not start another round of
+          # workflows. It cannot retrigger this one -- a push is not a
+          # pull_request event -- but it would run any push-triggered job.
+          git commit -m "Bump version to ${NEW} after #${PR} [skip ci]"
+          # main may have moved while this ran; rebase rather than force.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "pushed ${OLD} -> ${NEW}"
+              exit 0
+            fi
+            echo "push rejected, rebasing (attempt ${attempt})"
+            git pull --rebase origin main
+          done
+          echo "could not push after 3 attempts" >&2
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Version ${{ steps.bump.outputs.old }} → ${{ steps.bump.outputs.new }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Triggered by #${{ github.event.pull_request.number }}. Label a PR \`minor\`, \`major\`, or \`no-version-bump\` to change this." >> "$GITHUB_STEP_SUMMARY"
