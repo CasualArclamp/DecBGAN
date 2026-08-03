@@ -27,6 +27,7 @@ Submodules, roughly bottom-up:
     pcapout   pcap writers and IPv4 carving
     findings  certificates, DNS, HTTP and TLS carved from a payload
     tx        reference transmitter, used to validate the receiver
+    update    version check against the published VERSION file (opt-out)
 
 Importing this package does not pull in numba or scipy; submodules are left to
 be imported explicitly so that a caller who only wants, say, `bgan.spec` does
@@ -37,9 +38,23 @@ README.md for where to fetch them; `bgan.annex.annex_dir` looks in the
 repository root, `work/` and `annex/`.
 """
 
-__version__ = "0.3.0"
+# VERSION at the repository root is the source of truth, so that the update
+# check can compare against one short file rather than parsing source. The
+# literal below is only reached when that file is absent -- a vendored copy
+# of the package without the repository around it.
+def _read_version():
+    from pathlib import Path
+    try:
+        v = (Path(__file__).resolve().parent.parent
+             / "VERSION").read_text(encoding="utf-8").strip()
+        return v or "0.4.0"
+    except OSError:
+        return "0.4.0"
+
+
+__version__ = _read_version()
 
 __all__ = [
     "annex", "bctpdu", "bctrl", "bulletin", "carrier", "decoder", "mod", "pcapout",
-    "findings", "pipeline", "recv", "spec", "turbo", "tx",
+    "findings", "pipeline", "recv", "spec", "turbo", "tx", "update",
 ]
