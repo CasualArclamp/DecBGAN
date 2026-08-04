@@ -112,6 +112,7 @@ class Result:
         self.bulletins = []     # (frame, BulletinBoard)
         self.bb_period = None
         self.bb_offset = None
+        self.bb_level = None    # coding level block 0 used, e.g. "L3" or "R"
 
 
 class Worker(threading.Thread):
@@ -180,18 +181,56 @@ class Worker(threading.Thread):
         self.emit("done", result=r)
 
 
+def _bb_threshold(n, mod=4096, alpha=0.01):
+    """How many frames must agree on a frame-number offset to mean anything.
+
+    bulletin.confirm returns the commonest offset whatever its count, so a
+    single chance hit reads as a BulletinBoard -- on 40 random payloads it
+    duly invented one. The offsets of unrelated payloads are uniform over
+    `mod`, so the count in each of the `mod` bins is Poisson(n/mod); take the
+    count whose chance of arising in ANY bin is below alpha.
+
+    It has to scale with n rather than be a constant: 3 agreeing frames out
+    of 40 is decisive, out of 2766 it is expected.
+    """
+    from scipy.stats import poisson
+    return max(3, int(poisson.isf(alpha/mod, n/mod)) + 1)
+
+
 def _bulletins(r):
-    uw = "L3"
-    sel = [(f, bits) for (f, b, lv, ag, bits) in r.recs if b == 0 and lv == uw]
-    if len(sel) < 3:
+    """BulletinBoards carried in block 0, whatever coding level it uses.
+
+    Block 0's level is whatever its unique word signalled, and that is not
+    always L3. The 1538.099 capture is entirely level R, so filtering on L3
+    meant the BulletinBoard was never looked for at all: the panel reported
+    no spot beam for a payload whose block 0 opens with 0xc9 -- the
+    BulletinBoard Bearer Control header -- in 241 of its 248 frames.
+
+    Levels are tried commonest first rather than pooled, because
+    bulletin.confirm needs one payload length and each coding level carries a
+    different number of information bits (Annex B2: L3 2000, R 3000).
+    """
+    b0 = [(f, lv, bits) for (f, b, lv, ag, bits) in r.recs if b == 0]
+    if len(b0) < 3:
         return
-    frames = [f for f, _ in sel]
-    pays = [bits for _, bits in sel]
-    try:
-        off, mask, period = bulletin.confirm(pays, frames)
-    except Exception:
+    best = None
+    for lv in sorted({l for _f, l, _b in b0}):
+        sel = [(f, bits) for f, l, bits in b0 if l == lv]
+        if len(sel) < 3:
+            continue
+        frames = [f for f, _ in sel]
+        pays = [bits for _, bits in sel]
+        try:
+            off, mask, period = bulletin.confirm(pays, frames)
+        except Exception:
+            continue
+        n = int(np.count_nonzero(mask))
+        if n >= _bb_threshold(len(sel)) and (best is None or n > best[0]):
+            best = (n, lv, off, mask, period, frames, pays)
+    if best is None:
         return
-    r.bb_offset, r.bb_period = off, period
+    _n, lv, off, mask, period, frames, pays = best
+    r.bb_offset, r.bb_period, r.bb_level = off, period, lv
     r.bulletins = [(frames[i], bulletin.parse(pays[i]))
                    for i in np.flatnonzero(mask)]
 
@@ -1045,7 +1084,9 @@ class App(tk.Tk):
             bb = r.bulletins[0][1]
             bc = [
                 ("BulletinBoards", str(len(r.bulletins)),
-                 f"every {r.bb_period} frames" if r.bb_period else "", None),
+                 (f"every {r.bb_period} frames" if r.bb_period else "")
+                 + (f", block 0 at level {r.bb_level}"
+                    if r.bb_level else ""), None),
                 ("rnc-id/bct-id", f"{bb.rnc_id} / {bb.bct_id}", "", None),
                 ("f-bearer", str(bb.f_bearer), f"net-ver {bb.net_ver}", None),
                 ("spot-beam-id", str(bb.spot_beam_id), "", None),

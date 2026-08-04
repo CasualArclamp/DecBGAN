@@ -38,19 +38,29 @@ _DIGITS = re.compile(r"\d+")
 
 
 def local_version():
-    """This build's version -- always the one bgan.__version__ reports.
+    """This checkout's version, re-read from disk on every call.
 
-    A single reader. The version literal used to be repeated here and twice
-    more in bgan/__init__.py, which was three things a version bump had to
-    keep in step; now VERSION is read once, and when it is missing the answer
-    is the explicit UNKNOWN_VERSION marker rather than a stale release number.
+    Deliberately NOT `bgan.__version__`, which is evaluated once at import.
+    apply_update() checks the version AFTER pulling, and a snapshot taken
+    before the pull can never show the new one -- it would report failure on
+    every successful update. `__version__` remains the import-time value for
+    anything that wants a stable answer; this is the live one.
 
-    strip() over there is load-bearing on Windows: with core.autocrlf the
-    checked-out VERSION is "0.4.0\\r\\n" while the server serves the stored
-    "0.4.0\\n", and comparing those raw would report an update on every start.
+    Read relative to ROOT, which is the checkout `git pull` operates on, so
+    the version checked afterwards is the one that was actually updated. The
+    version LITERAL still lives in exactly one place -- UNKNOWN_VERSION in
+    bgan/__init__.py -- which was the duplication worth removing.
+
+    strip() is load-bearing on Windows: with core.autocrlf the checked-out
+    VERSION is "0.4.0\\r\\n" while the server serves the stored "0.4.0\\n",
+    and comparing those raw would report an update on every start.
     """
-    from . import __version__
-    return __version__
+    from . import UNKNOWN_VERSION
+    try:
+        return (ROOT/"VERSION").read_text(encoding="utf-8").strip() \
+            or UNKNOWN_VERSION
+    except OSError:
+        return UNKNOWN_VERSION
 
 
 def remote_version(timeout=TIMEOUT, url=VERSION_URL):
