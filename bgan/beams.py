@@ -43,6 +43,11 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 TABLE = ROOT/"beams.json"
+# Your own beams go here, not in beams.json. This file is gitignored, so it
+# survives every `git pull` and never conflicts with the shared table -- add a
+# beam the moment you identify one, and send it upstream later if you want to.
+# See docs/BEAMS.md.
+LOCAL = ROOT/"beams.local.json"
 OBSERVATIONS = ROOT/"work"/"beam_observations.json"
 
 # SpotbeamVertex, clause 5.4.10.3.4. Values at or above this are reserved.
@@ -178,15 +183,35 @@ def locate(lat, lon, payload=None, table=None):
 
 # --- the table --------------------------------------------------------------
 
-def load(path=None):
-    """{beam_id: {"name":..., "source":..., "note":...}}. {} if absent."""
-    p = Path(path or TABLE)
+def _read(p):
+    """{beam_id: entry} out of one table file. {} if absent or malformed."""
     try:
-        d = json.loads(p.read_text(encoding="utf-8"))
+        d = json.loads(Path(p).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return {int(k): v for k, v in d.get("beams", {}).items()
             if str(k).isdigit()}
+
+
+def load(path=None, local=True):
+    """{beam_id: {"name":..., "source":..., "note":...}}. {} if absent.
+
+    Two files, merged: the shared `beams.json` and your own `beams.local.json`,
+    with yours winning on a clash. Keeping them apart is what lets you add a
+    beam without editing a tracked file -- no merge conflict on the next pull,
+    and no accidental publishing of where you listen from.
+
+    `path` loads exactly one file and skips the overlay, which is what the
+    tests want.
+    """
+    if path is not None:
+        return _read(path)
+    t = _read(TABLE)
+    for b, e in _read(LOCAL).items():
+        e = dict(e)
+        e.setdefault("source", "local")
+        t[b] = e
+    return t
 
 
 def name(beam_id, path=None):

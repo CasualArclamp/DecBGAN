@@ -32,6 +32,12 @@ work/
 *.cf32
 *.sigmf-data
 
+# --- your own beam table -----------------------------------------------------
+# Add your beams to beams.local.json, not to the tracked beams.json: it will
+# not conflict on a pull, and a beam list is a coverage map of where you
+# listen from, which is yours to publish or not. See docs/BEAMS.md.
+beams.local.json
+
 # --- python ------------------------------------------------------------------
 __pycache__/
 *.py[cod]

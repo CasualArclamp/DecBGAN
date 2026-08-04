@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "Copy this to beams.local.json and edit it. That filename is gitignored,",
+    "so your entries survive every pull and never conflict with the shared",
+    "table in beams.json. Entries here win over beams.json for the same id.",
+    "",
+    "Only 'name' is required. 'source' defaults to 'local'.",
+    "Use 'reported' if someone told you, 'observed' if you worked it out",
+    "from your own decodes, 'broadcast' only for a decoded SpotBeamMap.",
+    "",
+    "The beam id is what the GUI prints as spot-beam-id, from the",
+    "BulletinBoard in FEC block 0. See docs/BEAMS.md."
+  ],
+  "beams": {
+    "118": {
+      "name": "Melbourne",
+      "source": "observed",
+      "note": "example entry -- delete this and add your own"
+    }
+  }
+}
