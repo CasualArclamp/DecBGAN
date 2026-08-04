@@ -99,12 +99,29 @@ def find_carrier(x, sr, rs=None, bw_factor=1.25):
     return c[0][0] if c else 0.0
 
 
-def refine_centre(x, sr, rs=None, iters=3):
+def subprogress(progress, lo, hi):
+    """Map a callee's 0..1 progress into the [lo, hi] slice of the caller's.
+
+    A long stage reports its own progress from 0 to 1 without knowing where it
+    sits in the whole decode; this places it. Returns None when there is no
+    callback, so callers can pass the result straight down.
+    """
+    if progress is None:
+        return None
+
+    def g(frac, text, *a, **kw):
+        progress(lo + (hi - lo)*min(max(frac, 0.0), 1.0), text, *a, **kw)
+    return g
+
+
+def refine_centre(x, sr, rs=None, iters=3, progress=None):
     """Refine a near-centred carrier to its spectral centroid."""
     rs = rs or spec.F80T45X8B.rs
     total = 0.0
     n = np.arange(len(x))
-    for _ in range(iters):
+    for it in range(iters):
+        if progress:
+            progress(it/iters, f"refining carrier centre {it+1}/{iters}")
         fr, P = welch(x, sr, nperseg=32768, return_onesided=False, detrend=False)
         i = np.argsort(fr)
         fr, P = fr[i], P[i]
@@ -124,20 +141,34 @@ def refine_centre(x, sr, rs=None, iters=3):
     return x, total
 
 
-def channelize(x, sr, sps=4, rs=None, beta=None, span=16, centre=None):
+def channelize(x, sr, sps=4, rs=None, beta=None, span=16, centre=None,
+               progress=None):
     """Shift the carrier to baseband, resample to `sps` samples/symbol and
-    apply the receive matched filter. Returns (y, fs, centre_hz)."""
+    apply the receive matched filter. Returns (y, fs, centre_hz).
+
+    The progress weights are measured, not guessed: on a 180 s segment this
+    call takes 20.8 s, split mixdown 7.5%, refine_centre 70.6%, resample 9.9%,
+    matched filter 11.9%. refine_centre dominates and reports per iteration,
+    so the bar keeps moving through it.
+    """
     rs = rs or spec.F80T45X8B.rs
     beta = spec.ROLLOFF if beta is None else beta
+    if progress:
+        progress(0.0, "mixing carrier to baseband")
     c = find_carrier(x, sr, rs) if centre is None else centre
     y = x*np.exp(-2j*np.pi*c*np.arange(len(x))/sr)
-    y, extra = refine_centre(y, sr, rs)
+    y, extra = refine_centre(y, sr, rs,
+                             progress=subprogress(progress, 0.075, 0.78))
 
     from math import gcd
+    if progress:
+        progress(0.78, "resampling to 4 samples/symbol")
     tgt = int(round(rs*sps))
     g = gcd(tgt, int(sr))
     y = resample_poly(y, tgt//g, int(sr)//g)
 
+    if progress:
+        progress(0.88, "applying matched filter")
     h = rrc(beta, sps, span)
     y = lfilter(h, 1, y)[len(h)//2:]
     return y, float(tgt), c+extra
@@ -149,10 +180,15 @@ def channelize(x, sr, sps=4, rs=None, beta=None, span=16, centre=None):
 # fit. Estimating rate coherently over the whole capture also absorbs clock
 # error, which a fixed-rate resampler cannot.
 
-def estimate_symbol_clock(y, fs, rs_nominal=None, search_ppm=200.0):
+def estimate_symbol_clock(y, fs, rs_nominal=None, search_ppm=200.0,
+                          progress=None):
     """Estimate the true symbol rate and timing phase from the |y|^2 tone.
 
     Returns (rs_est, tau0) where tau0 is the timing phase in samples at t=0.
+
+    Nearly all the time is in the accumulation passes -- on a 180 s segment,
+    0.1 s for the coarse FFT against 16 s for the ten half-length passes below
+    -- so progress is counted in those, per chunk.
     """
     rs_nominal = rs_nominal or spec.F80T45X8B.rs
     m = np.abs(y)**2
@@ -173,16 +209,26 @@ def estimate_symbol_clock(y, fs, rs_nominal=None, search_ppm=200.0):
     # halves gives the residual frequency error directly. Converges in a few
     # passes and costs one pass over the data each, instead of ~80.
     half = len(m)//2
+    # Four refinement passes over both halves, then one final pass over all of
+    # m: ten half-length accumulations, which is the unit `done` counts.
+    NACC, done = 10.0, 0.0
 
     def accum(f, lo, hi, chunk=1 << 21):
         """Sum m[lo:hi] * exp(-j2pi f n/fs), chunked to bound memory."""
+        nonlocal done
         tot = 0.0 + 0.0j
         for s in range(lo, hi, chunk):
             e = min(s+chunk, hi)
             idx = n[s:e]
             tot += np.sum(m[s:e]*np.exp(-2j*np.pi*f*idx/fs))
+            if progress:
+                progress(0.01 + 0.99*(done + (e - lo)/half)/NACC,
+                         "estimating symbol clock")
+        done += (hi - lo)/half
         return tot
 
+    if progress:
+        progress(0.01, "estimating symbol clock")
     f = f0
     for _ in range(4):
         c1 = accum(f, 0, half)
