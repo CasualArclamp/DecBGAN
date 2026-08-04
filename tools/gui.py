@@ -405,7 +405,10 @@ class App(tk.Tk):
         self.stop.set()                 # stop any decode before files move
 
         def run():
-            done, out = update.apply_update()
+            # Pass the expected version so a pull that exits 0 without moving
+            # anything is reported as the failure it is, rather than closing
+            # the app and re-offering the same update at the next start.
+            done, out = update.apply_update(expect=st["remote"])
             self.q.put(("updapplied", {"done": done, "out": out, "st": st}))
         threading.Thread(target=run, daemon=True).start()
 
