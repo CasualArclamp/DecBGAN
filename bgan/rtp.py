@@ -46,6 +46,26 @@ DECODABLE = {0: "PCMU", 8: "PCMA"}
 MIN_PACKETS = 4                 # a stream is at least this many, sharing SSRC
 CLOCK_HZ = 8000                 # G.711 sample rate
 
+# Sequence numbers of a real stream are dense: they advance by one per packet,
+# so the span they cover is close to their count. This is the test that
+# actually separates RTP from anything else, because it asks whether the
+# packets form a *sequence* rather than whether a header-shaped pattern
+# appears. Random or constant bytes scatter over the full 16-bit range and
+# score near zero. Set to allow roughly two thirds of a stream to be missing,
+# which is generous for a carve full of failed-block gaps.
+MIN_SEQ_DENSITY = 0.34
+
+# RTP is carried on dynamic ports. A well-known port is a service, and the
+# service that bit us was DNS: an RTP header laid over a DNS message puts the
+# SSRC field exactly on NSCOUNT+ARCOUNT, which is 0x00000000 for an ordinary
+# response -- so every such response shared an "SSRC" and grouped into a
+# stream. Rejecting ports below 1024 removes DNS, HTTP, HTTPS and NTP at once.
+MIN_PORT = 1024
+
+# RFC 3551: static payload types, plus the 96-127 dynamic range. Anything else
+# (76, say) is not a payload type at all.
+VALID_PT = set(range(0, 35)) | set(range(96, 128))
+
 
 # --- G.711, ITU-T / Sun reference -------------------------------------------
 
@@ -116,10 +136,17 @@ def packets(payload):
         u = pkt[ihl:]
         if len(u) < 8:
             continue
+        sport, dport = (u[0] << 8) | u[1], (u[2] << 8) | u[3]
+        if sport < MIN_PORT or dport < MIN_PORT:
+            continue                    # a well-known port is a service
         ulen = (u[4] << 8) | u[5]
         body = u[8:ulen] if 8 <= ulen <= len(u) else u[8:]
         if len(body) < 12 or (body[0] >> 6) != 2:
             continue
+        if (body[1] & 0x7F) not in VALID_PT:
+            continue
+        if not int.from_bytes(body[8:12], "big"):
+            continue                    # SSRC 0 is a constant field, not a src
         cc = body[0] & 0x0F
         ext = (body[0] >> 4) & 1
         hlen = 12 + 4 * cc
@@ -134,7 +161,7 @@ def packets(payload):
                 continue
         out.append(Packet(
             offset=off, src=_ip(pkt, 12), dst=_ip(pkt, 16),
-            sport=(u[0] << 8) | u[1], dport=(u[2] << 8) | u[3],
+            sport=sport, dport=dport,
             ssrc=int.from_bytes(body[8:12], "big"),
             seq=(body[2] << 8) | body[3],
             timestamp=int.from_bytes(body[4:8], "big"),
@@ -166,11 +193,24 @@ class Stream:
         return min(p.offset for p in self.packets)
 
     @property
+    def span(self):
+        seqs = sorted(p.seq for p in self.packets)
+        return ((seqs[-1] - seqs[0]) & 0xFFFF) + 1
+
+    @property
+    def density(self):
+        """Distinct sequence numbers as a fraction of the span they cover.
+
+        1.0 is an unbroken run. Real RTP stays near it even with losses;
+        unrelated packets that merely share a byte pattern scatter over the
+        16-bit range and score near zero.
+        """
+        return len(set(p.seq for p in self.packets))/max(1, self.span)
+
+    @property
     def lost(self):
         """Packets missing from the sequence-number span, i.e. gaps."""
-        seqs = sorted(p.seq for p in self.packets)
-        span = ((seqs[-1] - seqs[0]) & 0xFFFF) + 1
-        return max(0, span - len(set(seqs)))
+        return max(0, self.span - len(set(p.seq for p in self.packets)))
 
     @property
     def seconds(self):
@@ -220,9 +260,11 @@ def streams(payload, min_packets=MIN_PACKETS):
         if len(keep) < min_packets:
             continue
         first = min(keep, key=lambda p: p.offset)
-        out.append(Stream(ssrc=ssrc, src=src, dst=dst,
-                          sport=first.sport, dport=first.dport,
-                          pt=pt, packets=keep))
+        s = Stream(ssrc=ssrc, src=src, dst=dst,
+                   sport=first.sport, dport=first.dport, pt=pt, packets=keep)
+        if s.density < MIN_SEQ_DENSITY:
+            continue                    # shares a byte pattern, not a sequence
+        out.append(s)
     out.sort(key=lambda s: s.offset)
     return out
 
