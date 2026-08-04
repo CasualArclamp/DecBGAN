@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "Spot-beam ID -> place. A BulletinBoard names its beam by number only,",
+    "so this table supplies the geography.",
+    "",
+    "Nothing here is derived from the signal. Each entry records where it",
+    "came from in 'source', so an observed fact and a guess never blur:",
+    "  reported  - told to the project by an operator of a receiver",
+    "  broadcast - decoded from a SpotBeamMap AVP (TS 102 744-3-1 5.4.10)",
+    "",
+    "The broadcast map would be authoritative and would make this file",
+    "redundant. See bgan/beams.py:vertex_runs -- it searches a payload for",
+    "the vertex polygons. No SpotBeamMap has been caught yet; the map is",
+    "large and sent on a long cycle, so it needs a long capture.",
+    "",
+    "Add your own: \"<beam id>\": {\"name\": \"...\", \"source\": \"reported\"}"
+  ],
+  "beams": {
+    "104": {
+      "name": "Melbourne",
+      "source": "reported",
+      "note": "reported as one of 118/104 covering Melbourne; which of the two, or whether both, is not yet pinned down"
+    },
+    "118": {
+      "name": "Melbourne",
+      "source": "reported",
+      "note": "reported as one of 118/104 covering Melbourne; which of the two, or whether both, is not yet pinned down"
+    },
+    "134": {
+      "name": "Brisbane",
+      "source": "reported",
+      "note": "seen on the 1534.499 MHz carrier, rnc 29 / bct 1"
+    }
+  }
+}
