@@ -97,6 +97,14 @@ def _git(*args):
                           text=True, timeout=120)
 
 
+def current_branch():
+    try:
+        r = _git("rev-parse", "--abbrev-ref", "HEAD")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
 def can_update():
     """(True, "") if a fast-forward pull is safe here, else (False, why)."""
     if not (ROOT/".git").exists():
@@ -111,14 +119,36 @@ def can_update():
     if r.stdout.strip():
         return False, ("you have uncommitted changes -- commit or stash them "
                        "first, so the update cannot overwrite your work")
+    # `git pull` follows whatever HEAD tracks, which on a feature branch is
+    # that branch's own remote -- already up to date, so git exits 0 having
+    # changed nothing while the published version sits on BRANCH. Left
+    # unchecked that reports success, closes the app, and offers the same
+    # update again on every start.
+    b = current_branch()
+    if b and b != BRANCH:
+        return False, (f"this checkout is on '{b}', not '{BRANCH}'. A pull "
+                       f"here updates that branch, not the released one -- "
+                       f"run `git checkout {BRANCH}` first")
+    if b == "HEAD":
+        return False, ("this checkout has a detached HEAD -- run "
+                       f"`git checkout {BRANCH}` first")
     return True, ""
 
 
-def apply_update():
-    """Fast-forward the checkout to the published version. (ok, message)."""
+def apply_update(expect=None):
+    """Fast-forward the checkout to the published version. (ok, message).
+
+    `expect` is the version the caller was told is available. It is checked
+    AFTERWARDS, because git's exit code only says the command ran, not that
+    it achieved anything: a pull on a branch that is already current exits 0
+    having moved nothing. Reporting that as success closed the app and left
+    the same update on offer at the next start, forever. The post-condition
+    is the version actually changing.
+    """
     ok, why = can_update()
     if not ok:
         return False, why
+    before = local_version()
     try:
         r = _git("pull", "--ff-only")
     except (OSError, subprocess.SubprocessError) as exc:
@@ -130,7 +160,15 @@ def apply_update():
             out += ("\n\nYour checkout has commits that are not published. "
                     "Nothing was changed.")
         return False, out or "git pull failed"
-    return True, out or "already up to date"
+    after = local_version()
+    if expect and after != expect:
+        return False, (f"git reported success, but this checkout is still at "
+                       f"{after} rather than {expect}.\n\n{out}\n\n"
+                       f"Nothing was installed. On branch "
+                       f"'{current_branch() or '?'}'.")
+    if expect is None and after == before:
+        return True, out or "already up to date"
+    return True, out or f"updated {before} -> {after}"
 
 
 def main(argv=None):
