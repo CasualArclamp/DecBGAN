@@ -65,6 +65,13 @@ INFO_TAGS = {
 }
 LAB_W = 17          # label column width, characters
 
+# Segment length the toolbar checkbox asks for. Three minutes is well above
+# the 20 s floor where re-picking the carrier starts to fail, and measured
+# harmless: across sizes on a capture decoding 6257 blocks whole, 30 s gave
+# 101.7% and 120 s gave 100.0%. At ~49 MB/s of capture it peaks near 8.6 GB,
+# so it is a deliberate choice rather than the memory-driven default.
+SEG_BUTTON_SECS = 180.0
+
 
 class Fit(str):
     """A value shortened to fit rather than wrapped over several lines.
@@ -117,10 +124,11 @@ class Result:
 
 
 class Worker(threading.Thread):
-    def __init__(self, path, secs, search_levels, q, stop):
+    def __init__(self, path, secs, search_levels, q, stop, segment=None):
         super().__init__(daemon=True)
         self.path, self.secs = path, secs
         self.search = search_levels
+        self.segment = segment          # None = let decode_auto decide
         self.q, self.stop = q, stop
 
     def emit(self, kind, **kw):
@@ -159,7 +167,7 @@ class Worker(threading.Thread):
             # because segmenting costs a frame at each seam.
             recs, info, (tau_idx, offs, lvls, mets) = decode_auto(
                 self.path, secs=self.secs, search_levels=self.search,
-                progress=prog)
+                segment=self.segment, progress=prog)
         except KeyboardInterrupt:
             self.emit("status", text="stopped", pct=0)
             return
@@ -522,6 +530,14 @@ class App(tk.Tk):
                         variable=self.searchvar,
                         command=lambda: self._probe_path()).pack(
                             side="left", padx=6)
+        # Forces SEG_BUTTON_SECS segments regardless of the memory budget.
+        # Off by default because segmenting costs a frame at each seam, and
+        # decode_auto already segments on its own when a capture would not
+        # otherwise fit -- this is for asking on purpose.
+        self.segvar = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text=f"{SEG_BUTTON_SECS/60:.0f} min segments",
+                        variable=self.segvar,
+                        command=self._probe_path).pack(side="left", padx=(0, 6))
         ttk.Button(top, text="Scan", command=self._scan).pack(side="left", padx=2)
         self.btn = ttk.Button(top, text="Decode", command=self._start)
         self.btn.pack(side="left", padx=2)
@@ -786,11 +802,32 @@ class App(tk.Tk):
         frames = p["secs"]/0.080
         est = p["secs"]*EST_SEC_PER_SEC*(
             1.0 if self.searchvar.get() else EST_NOSEARCH_RATIO)
+        # Say what the decode will actually cost in memory, and whether it
+        # will be segmented -- either because it was asked for or because it
+        # would not otherwise fit. Guessing this wrong once cost 21.5 GB.
+        secs = self._secs_wanted(p["secs"])
+        seg = SEG_BUTTON_SECS if self.segvar.get() else segment_for(secs)
+        nseg = max(1, int(np.ceil(secs/seg))) if seg else 1
+        # A segment longer than the capture is not a segment, and the memory
+        # follows whichever is shorter -- reporting the segment length would
+        # have claimed 8.4 GB for a 20 s decode.
+        span = min(seg, secs) if seg else secs
+        how = (f"whole, ~{estimate_ram(span)/2**30:.1f} GB" if nseg == 1
+               else f"{nseg} x {seg/60:.0f} min segments, "
+                    f"~{estimate_ram(span)/2**30:.1f} GB peak")
         self.capvar.set(
             f"{p['secs']:.1f} s  |  {p['sr']/1e3:.0f} kHz  {p['ch']}ch "
             f"{8*p['width']}-bit  |  {p['mb']:.0f} MB  |  "
             f"~{frames:.0f} frames, {frames*8:.0f} blocks  |  "
-            f"full decode ~{_hms(est)}")
+            f"full decode ~{_hms(est)}  |  {how}")
+
+    def _secs_wanted(self, cap_secs):
+        """Seconds the Decode button would use, from the secs box."""
+        try:
+            v = float(self.secsvar.get())
+        except (TypeError, ValueError):
+            return cap_secs
+        return min(v, cap_secs) if v > 0 else cap_secs
 
     def _use_max(self):
         if self.probe:
@@ -821,7 +858,9 @@ class App(tk.Tk):
             t.delete("1.0", "end")
         self.stop.clear()
         self.result = None
-        self.worker = Worker(p, secs, self.searchvar.get(), self.q, self.stop)
+        self.worker = Worker(p, secs, self.searchvar.get(), self.q, self.stop,
+                             segment=(SEG_BUTTON_SECS if self.segvar.get()
+                                      else None))
         self.worker.start()
         self._log(f"decoding {p}  ({secs} s, "
                   f"{'level search' if self.searchvar.get() else 'UW level'})")
