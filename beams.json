@@ -3,15 +3,20 @@
     "Spot-beam ID -> place. A BulletinBoard names its beam by number only,",
     "so this table supplies the geography.",
     "",
-    "Nothing here is derived from the signal. Each entry records where it",
-    "came from in 'source', so an observed fact and a guess never blur:",
+    "Each entry records where it came from in 'source', so an observed fact",
+    "and a guess never blur:",
     "  reported  - told to the project by an operator of a receiver",
     "  broadcast - decoded from a SpotBeamMap AVP (TS 102 744-3-1 5.4.10)",
     "",
-    "The broadcast map would be authoritative and would make this file",
-    "redundant. See bgan/beams.py:vertex_runs -- it searches a payload for",
-    "the vertex polygons. No SpotBeamMap has been caught yet; the map is",
-    "large and sent on a long cycle, so it needs a long capture.",
+    "The broadcast map has now been caught, on the 10 minute 1534.500 MHz",
+    "capture: seven beams, each twice with identical geometry, parsed by",
+    "bgan/beams.py:spot_beam_map. Those entries carry their polygon centre",
+    "and the places that fall inside by point-in-polygon, and they are",
+    "authoritative -- 134 was 'reported' as Brisbane and the broadcast",
+    "independently agrees.",
+    "",
+    "Only the serving beam and its six neighbours are broadcast, not the",
+    "whole map, so this file still needs 'reported' entries elsewhere.",
     "",
     "Add your own: \"<beam id>\": {\"name\": \"...\", \"source\": \"reported\"}"
   ],
@@ -19,17 +24,47 @@
     "104": {
       "name": "Melbourne",
       "source": "reported",
-      "note": "reported as one of 118/104 covering Melbourne; which of the two, or whether both, is not yet pinned down"
+      "note": "reported as one of 118/104 covering Melbourne; not in the broadcast neighbourhood, so still unresolved. The lattice predicts 104 one column west of 118, centred near lon +140, which would put Melbourne close to their shared edge -- which would explain the ambiguity, but it is a prediction and not a measurement"
     },
     "118": {
       "name": "Melbourne",
       "source": "reported",
-      "note": "reported as one of 118/104 covering Melbourne; which of the two, or whether both, is not yet pinned down"
+      "note": "reported as one of 118/104 covering Melbourne; not in the broadcast neighbourhood. The lattice predicts 118 one step south of 119, centred near (-38.6, +147), which would contain Melbourne -- prediction, not measurement"
+    },
+    "119": {
+      "name": "Inland NSW / southern QLD",
+      "source": "broadcast",
+      "note": "centre (-30.3, +146.8); contains Charleville, Bourke, Dubbo"
+    },
+    "120": {
+      "name": "Central QLD",
+      "source": "broadcast",
+      "note": "centre (-22.0, +146.3); contains Townsville, Mackay, Longreach"
+    },
+    "133": {
+      "name": "Sydney",
+      "source": "broadcast",
+      "note": "centre (-35.0, +154.8); contains Sydney, Newcastle, Wollongong, Coffs Harbour"
     },
     "134": {
       "name": "Brisbane",
-      "source": "reported",
-      "note": "seen on the 1534.499 MHz carrier, rnc 29 / bct 1"
+      "source": "broadcast",
+      "note": "centre (-26.0, +153.5); contains Brisbane, Gold Coast, Toowoomba, Bundaberg, Rockhampton. Was reported independently before the map was decoded, and the broadcast agrees. Seen on the 1534.499 and 1534.500 MHz carriers, rnc 29 / bct 1 and 2"
+    },
+    "135": {
+      "name": "Coral Sea (north)",
+      "source": "broadcast",
+      "note": "centre (-18.0, +152.8); almost entirely ocean, contains Willis Island"
+    },
+    "147": {
+      "name": "Tasman Sea / Lord Howe",
+      "source": "broadcast",
+      "note": "centre (-30.3, +161.7); ocean, contains Lord Howe Island"
+    },
+    "148": {
+      "name": "Coral Sea (east)",
+      "source": "broadcast",
+      "note": "centre (-22.0, +160.0); ocean, no populated place inside"
     }
   }
 }
