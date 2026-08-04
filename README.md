@@ -290,6 +290,7 @@ bgan/
   pipeline.py   end-to-end synchronise + decode
   bctrl.py      code-rate AVP, per-block level resolution
   bulletin.py   BulletinBoard SDU, AVP list walking
+  beams.py      spot-beam table, SpotBeamMap parsing
   pcapout.py    pcap writers, IPv4 carving
   tx.py         reference transmitter (for validation)
 tools/
@@ -298,11 +299,20 @@ tools/
 tests/
   waterfall.py, constellation.py
 docs/
-  VALIDATION.md, SIGNAL_NOTES.md, OPEN_QUESTIONS.md
+  VALIDATION.md, SIGNAL_NOTES.md, OPEN_QUESTIONS.md, BEAMS.md
+beams.json                  shared spot-beam table
+beams.local.json.example    copy to beams.local.json for your own
 ```
 
 [`docs/OPEN_QUESTIONS.md`](docs/OPEN_QUESTIONS.md) tracks what the spec does
 not pin down, what was resolved and how, and what is still guesswork.
+
+A decode prints its spot beam by number. To put a name to one, copy
+`beams.local.json.example` to `beams.local.json` and add it there — that
+filename is gitignored, so it survives a pull and never conflicts with the
+shared table. [`docs/BEAMS.md`](docs/BEAMS.md) covers the format, the
+`source` field, and how to pull the geography straight out of a SpotBeamMap
+broadcast.
 
 ---
 

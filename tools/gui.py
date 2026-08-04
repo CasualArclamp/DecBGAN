@@ -1184,7 +1184,8 @@ class App(tk.Tk):
                  # an unmapped beam says so rather than being guessed at.
                  (f"-- {beams.name(bb.spot_beam_id)}"
                   if beams.name(bb.spot_beam_id)
-                  else "-- not in beams.json; add it to name this area"),
+                  else "-- unmapped; name it in beams.local.json "
+                       "(see docs/BEAMS.md)"),
                  "ok" if beams.name(bb.spot_beam_id) else None),
             ]
             plmn = _plmn(bb)
