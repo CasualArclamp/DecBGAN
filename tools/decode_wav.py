@@ -891,15 +891,102 @@ def decode_block_fast(blk, b, pred, thr=ACCEPT_AGREEMENT, hint=None):
 
 
 
-SEGMENT_SECS = 10.0
+# Default segment length. Raised from 10 s after measuring the cost across
+# sizes on a capture that decodes 6257 blocks whole:
+#
+#     10 s  6210  99.2%      60 s  6228   99.5%
+#     30 s  6363 101.7%     120 s  6257  100.0%
+#
+# so on that capture segmenting is free, and at 30 s it recovers 1.7% MORE
+# than decoding whole -- the carrier drift this function was written for.
+# That does not overturn the ~50% loss recorded below on a different capture:
+# the penalty is capture-dependent, and a long segment is what is safe on
+# both, because pick_carrier's thresholds need more than a few seconds.
+SEGMENT_SECS = 120.0
+
+# Peak working set per second of capture, MEASURED rather than derived. The
+# channelised array itself is only rs*sps*16 = 9.7 MB/s, and reasoning from
+# that alone was 5x optimistic: the carrier phasor, the resample_poly output,
+# the lfilter output and the per-timing-phase symbol arrays are all live at
+# once. Measured on a 192 kHz capture, decoded whole:
+#
+#      30 s  1.50 GB      120 s   5.62 GB
+#      60 s  2.87 GB      240 s  11.11 GB
+#
+# a straight line of 46 MB/s plus ~0.13 GB of interpreter and numba. A 25 min
+# capture extrapolates to 71 GB; the attempt that prompted this reached
+# 21.5 GB before being killed.
+BYTES_PER_SECOND = 49_000_000
+BASELINE_BYTES = 140 << 20              # interpreter, numba, matplotlib
+
+# Peak a decode may reach before it is segmented. Segmenting is not free -- a
+# frame is lost at each seam and the carrier is re-acquired -- so this is set
+# where a long capture stays comfortable on an ordinary machine rather than as
+# low as possible.
+MEMORY_BUDGET = 4 << 30                 # 4 GiB
+
+
+def segment_for(secs, budget=MEMORY_BUDGET, segment=SEGMENT_SECS):
+    """Segment length to keep the channelised copy under `budget`, or None.
+
+    None means "decode it whole" -- segmenting is not free (it re-acquires
+    per segment and loses a frame at each seam), so it is applied only when
+    decoding whole would not fit.
+    """
+    if not secs or estimate_ram(secs) <= budget:
+        return None
+    fits = (budget - BASELINE_BYTES)/BYTES_PER_SECOND
+    # Never go below 20 s: re-picking the carrier needs several seconds of
+    # signal, and short segments are where decode_segmented loses blocks.
+    return float(min(segment, max(20.0, fits)))
+
+
+def estimate_ram(secs):
+    """Measured peak working set for decoding `secs` whole, in bytes."""
+    return (secs or 0)*BYTES_PER_SECOND + BASELINE_BYTES
+
+
+def decode_auto(path, secs=None, progress=None, segment=None, **kw):
+    """decode_capture, or decode_segmented when the capture is too long.
+
+    `segment`: None chooses automatically from the memory budget, a positive
+    number forces that segment length, and 0 forces decoding whole.
+    """
+    total = secs if secs is not None else wav_seconds(path)
+    if segment is None:
+        segment = segment_for(total)
+    elif segment <= 0:
+        segment = None
+    if not segment:
+        return decode_capture(path, secs=secs, progress=progress, **kw)
+    return decode_segmented(path, secs=secs, segment=segment,
+                            progress=progress, **kw)
+
+
+def wav_seconds(path):
+    """Capture length in seconds from the header alone, or None."""
+    import wave
+    try:
+        with wave.open(str(path)) as w:
+            return w.getnframes()/w.getframerate()
+    except Exception:
+        return None
 
 
 def decode_segmented(path, secs=None, segment=SEGMENT_SECS, progress=None,
                      **kw):
     """Decode a capture in segments, re-estimating clock and framing in each.
 
-    EXPERIMENTAL, and off by default because it currently loses more than it
-    recovers. Use --segment N to enable.
+    Used automatically for captures too long to channelise whole -- see
+    segment_for() -- and available explicitly with --segment N.
+
+    The cost is capture-dependent, which the measurements below did not make
+    clear when they were taken at 10 s on one file. Across segment sizes on a
+    capture that decodes 6257 blocks whole: 10 s 99.2%, 30 s 101.7%, 60 s
+    99.5%, 120 s 100.0%. So a long segment is free there and 30 s is better
+    than whole, while on the capture measured further down 10 s cost about
+    half. A long segment is what is safe on both, because re-picking the
+    carrier needs more than a few seconds of signal.
 
     The motivating measurement is real: the carrier wanders within a capture.
     One 60 s file fits +198.9 Hz globally but -152.1 Hz over the eight
@@ -1002,6 +1089,7 @@ def decode_segmented(path, secs=None, segment=SEGMENT_SECS, progress=None,
     info = dict(infos[0])
     info["nframes"] = frames_done
     info["segments"] = len(infos)
+    info["segment_secs"] = segment
     info["secs"] = total
     info["centre_spread"] = (max(i["centre"] for i in infos)
                              - min(i["centre"] for i in infos))
@@ -1077,11 +1165,12 @@ def main():
     ap.add_argument("--thr", type=float, default=ACCEPT_AGREEMENT,
                     help="parity-agreement threshold; see ACCEPT_AGREEMENT")
     ap.add_argument("--level", default=None, help="force coding level")
-    ap.add_argument("--segment", type=float, default=0.0,
-                    help="EXPERIMENTAL: decode in N-second segments, "
-                         "re-estimating clock and framing in each. Off by "
-                         "default; currently costs ~16%% of blocks on a "
-                         "capture that decodes well whole.")
+    ap.add_argument("--segment", type=float, default=None,
+                    help="decode in N-second segments, re-estimating clock "
+                         "and framing in each. Default: automatic, used only "
+                         "when the capture is too long to channelise whole "
+                         "(over ~%d min). 0 forces whole; N forces N seconds."
+                         % int(MEMORY_BUDGET/BYTES_PER_SECOND/60))
     ap.add_argument("--survey", action="store_true",
                     help="fast scan only: unique words, framing, timing and a "
                          "yield forecast, with no turbo decoding")
@@ -1149,8 +1238,8 @@ def main():
             print(f"    ... {len(info['runs'])-30} more")
         return 0
 
-    runner = decode_segmented if a.segment > 0 else decode_capture
-    extra = {"segment": a.segment} if a.segment > 0 else {}
+    runner = decode_auto
+    extra = {"segment": a.segment}
     try:
         recs, info, (tau_idx, offs, lvls, mets) = runner(
             a.path, secs=a.secs, thr=a.thr, level=a.level,

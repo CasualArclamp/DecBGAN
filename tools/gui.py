@@ -37,8 +37,9 @@ from scipy.signal import welch                                # noqa: E402
 
 from bgan import (spec, mod, recv, bulletin, pcapout, beams,   # noqa: E402
                   findings, sip, rtp, terminals, update)
-from tools.decode_wav import (decode_capture, survey, NoCarrier,  # noqa: E402
-                              channelise, safe_stem, MOS)
+from tools.decode_wav import (decode_capture, decode_auto,       # noqa: E402
+                              survey, NoCarrier, segment_for,
+                              estimate_ram, channelise, safe_stem, MOS)
 
 NL = chr(10)
 BG = "#1c1f26"
@@ -152,7 +153,11 @@ class Worker(threading.Thread):
             self.emit("progress", pct=6 + 91*frac, text=text, const=const)
 
         try:
-            recs, info, (tau_idx, offs, lvls, mets) = decode_capture(
+            # decode_auto segments only when the capture is too long to
+            # channelise whole. A 25 min recording needs ~15 GB decoded whole
+            # and about 1 GB in segments; below the budget it is unsegmented,
+            # because segmenting costs a frame at each seam.
+            recs, info, (tau_idx, offs, lvls, mets) = decode_auto(
                 self.path, secs=self.secs, search_levels=self.search,
                 progress=prog)
         except KeyboardInterrupt:
@@ -1039,6 +1044,12 @@ class App(tk.Tk):
                          _grade(i["uw_evm"], 0.25, 0.45, invert=True)))
         if i.get("jobs"):
             qual.append(("decode threads", str(i["jobs"]), "", None))
+        # Segmenting is never silent: it re-acquires per segment and loses a
+        # frame at each seam, so the reader should know it happened.
+        if i.get("segments", 0) > 1:
+            qual.append(("segments", str(i["segments"]),
+                         f"of {i.get('segment_secs', 0):.0f} s -- capture too "
+                         f"long to channelise whole", None))
         if i.get("cfo_applied"):
             past = abs(i["cfo_hz"]) > 552.0
             qual.append(("carrier resid", f"{i['cfo_hz']:+.1f} Hz removed",
