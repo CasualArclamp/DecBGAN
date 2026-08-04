@@ -35,7 +35,7 @@ from matplotlib.backends.backend_tkagg import (                # noqa: E402
     FigureCanvasTkAgg)
 from scipy.signal import welch                                # noqa: E402
 
-from bgan import (spec, mod, recv, bulletin, pcapout,          # noqa: E402
+from bgan import (spec, mod, recv, bulletin, pcapout, beams,   # noqa: E402
                   findings, sip, rtp, terminals, update)
 from tools.decode_wav import (decode_capture, survey, NoCarrier,  # noqa: E402
                               channelise, safe_stem, MOS)
@@ -1089,11 +1089,22 @@ class App(tk.Tk):
                     if r.bb_level else ""), None),
                 ("rnc-id/bct-id", f"{bb.rnc_id} / {bb.bct_id}", "", None),
                 ("f-bearer", str(bb.f_bearer), f"net-ver {bb.net_ver}", None),
-                ("spot-beam-id", str(bb.spot_beam_id), "", None),
+                ("spot-beam-id", str(bb.spot_beam_id),
+                 # The place comes from beams.json, never from the signal --
+                 # an unmapped beam says so rather than being guessed at.
+                 (f"-- {beams.name(bb.spot_beam_id)}"
+                  if beams.name(bb.spot_beam_id)
+                  else "-- not in beams.json; add it to name this area"),
+                 "ok" if beams.name(bb.spot_beam_id) else None),
             ]
             plmn = _plmn(bb)
             if plmn:
                 bc.append(("PLMN", plmn, "", None))
+            beams.record(bb.spot_beam_id,
+                         freq_hz=(r.info.get("file_hz") or 0)
+                         + r.info.get("centre", 0.0),
+                         capture=r.info.get("path"),
+                         rnc_id=bb.rnc_id, bct_id=bb.bct_id)
             extra.append(("BEARER CONTROL", bc))
         self._show_info(r.info, extra)
 
