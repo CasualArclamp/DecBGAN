@@ -125,7 +125,8 @@ def record(beam_id, freq_hz=None, capture=None, rnc_id=None, bct_id=None,
                     freq_hz=int(freq_hz) if freq_hz else None,
                     capture=os.path.basename(capture or "") or None,
                     rnc_id=rnc_id, bct_id=bct_id,
-                    seen=datetime.now(timezone.utc).isoformat(timespec="seconds")))
+                    seen=datetime.now(timezone.utc)
+                    .isoformat(timespec="seconds")))
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(obs, indent=1), encoding="utf-8")
@@ -136,7 +137,8 @@ def record(beam_id, freq_hz=None, capture=None, rnc_id=None, bct_id=None,
 
 def observations(path=None):
     try:
-        return json.loads(Path(path or OBSERVATIONS).read_text(encoding="utf-8"))
+        p = Path(path or OBSERVATIONS)
+        return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
 
