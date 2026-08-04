@@ -36,7 +36,7 @@ from matplotlib.backends.backend_tkagg import (                # noqa: E402
 from scipy.signal import welch                                # noqa: E402
 
 from bgan import (spec, mod, recv, bulletin, pcapout,          # noqa: E402
-                  findings, sip, rtp, update)
+                  findings, sip, rtp, terminals, update)
 from tools.decode_wav import (decode_capture, survey, NoCarrier,  # noqa: E402
                               channelise, safe_stem, MOS)
 
@@ -542,6 +542,7 @@ class App(tk.Tk):
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.tab_int = self._textpage(nb, "Interesting")
+        self.tab_term = self._textpage(nb, "Terminals")
         self.tab_files = self._textpage(nb, "Files")
         self.tab_sip = self._textpage(nb, "SIP")
         self.tab_str = self._textpage(nb, "Strings")
@@ -768,8 +769,8 @@ class App(tk.Tk):
                       f"{self.probe['secs']:.1f} s - using the whole file")
             secs = self.probe["secs"]
             self.secsvar.set(f"{secs:.1f}")
-        for t in (self.tab_int, self.tab_files, self.tab_sip, self.tab_str,
-                  self.tab_bb, self.tab_pkt, self.tab_log):
+        for t in (self.tab_int, self.tab_term, self.tab_files, self.tab_sip,
+                  self.tab_str, self.tab_bb, self.tab_pkt, self.tab_log):
             t.delete("1.0", "end")
         self.stop.clear()
         self.result = None
@@ -1053,12 +1054,108 @@ class App(tk.Tk):
         self._show_info(r.info, extra)
 
         self._fill_interesting(r)
+        self._fill_terminals(r)
         self._fill_files(r)
         self._fill_sip(r)
         self._fill_strings(r)
         self._fill_bb(r)
         self._fill_pkts(r)
         self._log(f"done: {n} blocks, {len(r.payload)} bytes payload")
+
+    def _fill_terminals(self, r):
+        """Terminal addresses, their public IPs, and the ICMP around them.
+
+        The forward link carries traffic *to* terminals, so every carved
+        destination is one. Public addresses get a second, independent check
+        from the "what is my IP" DNS answers, and where such an answer was
+        delivered to the very address it named, the terminal is holding a
+        public IP directly rather than sitting behind carrier NAT.
+        """
+        t = self.tab_term
+
+        def put(s, *tags):
+            t.insert("end", s, tags or ())
+
+        ts = terminals.terminals(r.payload)
+        msgs, tally, flows = terminals.icmp_summary(r.payload)
+        pairs = terminals.nat_pairs(r.payload)
+        r.terminals, r.icmp = ts, msgs
+        if not ts and not msgs:
+            put("No terminal addresses found." + NL*2
+                + "Needs checksum-valid IPv4 in the payload, so a short or "
+                  "lossy decode yields none." + NL)
+            return
+
+        pub = [x for x in ts if x.kind == "public" and x.confidence != "weak"]
+        priv = [x for x in ts if x.kind == "private" and x.confidence != "weak"]
+        weak = [x for x in ts if x.confidence == "weak"]
+
+        put(f"PUBLIC IPs  ({len(pub)}){NL}", "head")
+        if pub:
+            put("   Every destination on the forward link is a terminal."
+                + NL
+                + "   SELF-CONFIRMED means a 'what is my IP' answer naming "
+                  "that address was" + NL
+                + "   delivered to it, so the terminal holds it directly "
+                  "rather than sitting" + NL
+                + "   behind carrier NAT." + NL, "dim")
+            for x in pub:
+                put(f"   {x.addr:16s}", "ok")
+                put(f"  {x.packets:5d} pkts", "dim")
+                if x.echoed:
+                    put(f"   echoed {x.echoed}x", "hval")
+                    put(f" via {', '.join(x.echo_names)}", "dim")
+                if x.self_confirmed:
+                    put("   SELF-CONFIRMED", "audio")
+                put(f"   [{x.confidence}]" + NL, "dim")
+        else:
+            put("   none seen. Terminals behind carrier NAT only ever show "
+                "their private address" + NL
+                + "   on the link; a public one appears when the terminal "
+                  "asks for it, or when it" + NL
+                + "   is not NATed at all." + NL, "dim")
+        put(NL)
+
+        if pairs:
+            put(f"NAT MAPPINGS  ({len(pairs)}){NL}", "head")
+            for k, v in pairs.items():
+                put(f"   {k:16s}", "uri")
+                put("  ->  ", "dim")
+                put(", ".join(f"{a} x{n}" for a, n in v.items()) + NL, "ok")
+            put(NL)
+
+        put(f"PRIVATE ADDRESSES  ({len(priv)}){NL}", "head")
+        for x in priv[:40]:
+            put(f"   {x.addr:16s}", "uri")
+            put(f"  {x.packets:5d} pkts   [{x.confidence}]" + NL, "dim")
+        if len(priv) > 40:
+            put(f"   ... {len(priv)-40} more{NL}", "dim")
+        put(NL)
+
+        if weak:
+            put(f"WEAK  ({len(weak)}, fewer than "
+                f"{terminals.MIN_PACKETS} packets){NL}", "head")
+            put("   Below the evidence bar. A carved packet can pass its "
+                "header checksum by chance," + NL
+                + "   and correspondents leak in here rather than being "
+                  "dropped silently." + NL, "dim")
+            put("   " + ", ".join(x.addr for x in weak[:24]) + NL, "flag")
+            put(NL)
+
+        put(f"ICMP  ({len(msgs)} messages){NL}", "head")
+        for k, v in tally.most_common():
+            put(f"   {v:5d}  {k}{NL}", "hval" if "unreach" in k else "dim")
+        if flows:
+            put(f"   {len(flows)} flow(s) named by quoted headers -- an error "
+                f"quotes the packet{NL}", "dim")
+            put(f"   that caused it, so these were seen only indirectly:{NL}",
+                "dim")
+            P = {1: "ICMP", 6: "TCP", 17: "UDP", 47: "GRE", 50: "ESP"}
+            for f in sorted(flows)[:24]:
+                put(f"      {f[0]}:{f[3]} -> {f[1]}:{f[4]} "
+                    f"{P.get(f[2], f[2])}{NL}", "hval")
+            if len(flows) > 24:
+                put(f"      ... {len(flows)-24} more{NL}", "dim")
 
     def _fill_files(self, r):
         """Whole files reconstructed from HTTP bodies, with a preview.
