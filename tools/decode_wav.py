@@ -24,7 +24,7 @@ import os
 import re
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -249,30 +249,45 @@ def pick_carrier(x, sr, sps=4, ncand=4, min_ratio=1.8, max_ppm=50.0,
 
 
 def channelise(path, secs=None, up=2, sps=4, centre=None, autopick=True,
-               offset=0.0, jobs=None):
+               offset=0.0, jobs=None, progress=None):
     """Raw WAV -> matched-filtered stream at `sps`, plus clock estimate.
 
     Returns (y, fs, rs_est, tau0, info). Symbol extraction is deliberately
     NOT done here -- see symbols_at / survey_taus for why the timing phase
     cannot be fixed once for the whole capture.
+
+    Stage weights are measured on a 180 s segment (40 s total): read 0.5%,
+    resample 4.6%, channelize 49.4%, symbol clock 45.5%. When a centre is
+    supplied -- which is what decode_segmented does -- pick_carrier is skipped
+    and the bar simply jumps its band, which is harmless; stalling is not.
     """
+    if progress:
+        progress(0.0, "reading capture")
     x, sr = recv.load_wav_iq(path, secs=secs, offset=offset)
     x = x - x.mean()
     raw_sr, raw_n = sr, len(x)
 
     # Upsample before any |x|^2 estimator so the symbol-rate line is unfolded.
     if up > 1 and spec.F80T45X8B.rs >= sr/2:
+        if progress:
+            progress(0.01, f"resampling {sr/1e3:.0f} -> {up*sr/1e3:.0f} kHz")
         x = resample_poly(x, up, 1)
         sr = sr*up
 
     carriers = None
     if centre is None and autopick:
+        if progress:
+            progress(0.05, "picking carrier")
         centre, carriers = pick_carrier(x, sr, sps, jobs=jobs)
         if centre is None:
             raise NoCarrier(carriers)
 
-    y, fs, centre = recv.channelize(x, sr, sps=sps, centre=centre)
-    rs_est, tau0 = recv.estimate_symbol_clock(y, fs)
+    y, fs, centre = recv.channelize(
+        x, sr, sps=sps, centre=centre,
+        progress=recv.subprogress(progress, 0.20, 0.58))
+    del x
+    rs_est, tau0 = recv.estimate_symbol_clock(
+        y, fs, progress=recv.subprogress(progress, 0.58, 1.0))
     info = dict(raw_sr=raw_sr, raw_n=raw_n, secs=raw_n/raw_sr, sr=sr,
                 carriers=carriers,
                 centre=centre, rs=rs_est,
@@ -459,7 +474,8 @@ def safe_stem(path, maxlen=64):
 TAU_STEPS = 8
 
 
-def survey_taus(y, fs, rs_est, tau0, ntau=TAU_STEPS, win=320, levels=None):
+def survey_taus(y, fs, rs_est, tau0, ntau=TAU_STEPS, win=320, levels=None,
+                progress=None):
     """Per frame, find the best (timing phase, frame offset) pair.
 
     This exists because `extract_symbols` applies one timing phase to the
@@ -498,7 +514,14 @@ def survey_taus(y, fs, rs_est, tau0, ntau=TAU_STEPS, win=320, levels=None):
                     [None]*nfr, np.full(nfr, -1.0))
         got = _corr(d, 1, MOS, pats)          # acquire on this phase
         off = got[1] if got else 0
+        # Report inside the frame loop, not just per phase: at ntau=8 the
+        # per-phase granularity alone would leave the bar still for ~2 s at a
+        # time, and this whole call is 18 s of a 162 s segment.
+        step = max(1, nfr//25)
         for f in range(nfr):
+            if progress and f % step == 0:
+                progress((k + f/nfr)/ntau,
+                         f"timing phase {k+1}/{ntau}, frame {f}/{nfr}")
             lo = max(1, off + f*MOS - win) if f else max(1, off - 4)
             g = _corr(d, lo, 2*win if f else 8, pats)
             if g is None:
@@ -594,10 +617,12 @@ def survey(path, secs=None, ntau=TAU_STEPS, progress=None, offset=0.0,
 
     Returns a dict.
     """
-    y, fs, rs_est, tau0, info = channelise(path, secs, offset=offset)
-    if progress:
-        progress(0.5, "scanning framing and timing")
-    tau_idx, offs, lvls, mets = survey_taus(y, fs, rs_est, tau0, ntau)
+    y, fs, rs_est, tau0, info = channelise(
+        path, secs, offset=offset,
+        progress=recv.subprogress(progress, 0.0, 0.5))
+    tau_idx, offs, lvls, mets = survey_taus(
+        y, fs, rs_est, tau0, ntau,
+        progress=recv.subprogress(progress, 0.5, 0.95))
     y, cfo = correct_cfo(y, fs, rs_est, tau0, ntau, tau_idx, offs, lvls,
                          enabled=cfo_enabled)
     info.update(cfo)
@@ -685,11 +710,18 @@ def decode_capture(path, secs=None, thr=ACCEPT_AGREEMENT, level=None,
     kernels are compiled nogil -- with the GIL held, 16 threads measured 0.98x,
     i.e. nothing. See bgan/decoder.py.
     """
-    y, fs, rs_est, tau0, info = channelise(path, secs, offset=offset,
-                                           centre=centre, jobs=jobs)
+    # Bands are the measured split of a 162 s segment, not a guess: channelise
+    # 40 s, survey_taus 18 s, correct_cfo 2.5 s, frames 80 s. They used to be
+    # 0.10 for everything before the frame loop, so the bar sat at 10% for
+    # half the segment and then raced -- which is what read as a freeze.
+    y, fs, rs_est, tau0, info = channelise(
+        path, secs, offset=offset, centre=centre, jobs=jobs,
+        progress=recv.subprogress(progress, 0.0, 0.25))
+    tau_idx, offs, lvls, mets = survey_taus(
+        y, fs, rs_est, tau0, ntau,
+        progress=recv.subprogress(progress, 0.25, 0.46))
     if progress:
-        progress(0.10, "searching timing phases")
-    tau_idx, offs, lvls, mets = survey_taus(y, fs, rs_est, tau0, ntau)
+        progress(0.46, "correcting carrier frequency offset")
     y, cfo = correct_cfo(y, fs, rs_est, tau0, ntau, tau_idx, offs, lvls,
                          enabled=cfo_enabled)
     info.update(cfo)
@@ -708,6 +740,9 @@ def decode_capture(path, secs=None, thr=ACCEPT_AGREEMENT, level=None,
         which = np.flatnonzero(tau_idx == k)
         if not len(which):
             continue
+        if progress:
+            progress(0.50 + 0.48*done/nfr,
+                     f"extracting symbols at timing phase {k+1}/{ntau}")
         s = symbols_at(y, fs, rs_est, tau0 + (k/ntau)*period)
         if k == 0:
             m4 = recv.timing_quality(s)
@@ -719,21 +754,32 @@ def decode_capture(path, secs=None, thr=ACCEPT_AGREEMENT, level=None,
                                              else None),
                                    search_levels)
 
-        if nw > 1 and len(which) > 1:
-            with ThreadPoolExecutor(nw) as ex:
-                results = ex.map(one_frame, [int(f) for f in which])
-                results = list(results)
-        else:
-            results = [one_frame(int(f)) for f in which]
+        def completed():
+            """Frames as they finish, so progress can report during a group.
 
-        for f, got in results:
+            ex.map was drained with list() before anything was reported, so a
+            whole tau group -- 10 to 20 s of a 162 s segment -- passed with
+            the bar motionless and then jumped by a hundred frames at once.
+            Yielding on completion costs nothing: recs is sorted at the end,
+            so arrival order never mattered.
+            """
+            if nw > 1 and len(which) > 1:
+                with ThreadPoolExecutor(nw) as ex:
+                    futs = [ex.submit(one_frame, int(f)) for f in which]
+                    for fu in as_completed(futs):
+                        yield fu.result()
+            else:
+                for f in which:
+                    yield one_frame(int(f))
+
+        for f, got in completed():
             for b, lv, ag, pay, snippet in got:
                 recs.append((int(f), b, lv, ag, pay))
                 if len(const) < 150:
                     const.append(snippet)
             done += 1
             if progress and done % 4 == 0:
-                progress(0.10 + 0.88*done/nfr,
+                progress(0.50 + 0.48*done/nfr,
                          f"decoded {done}/{nfr} frames - {len(recs)} blocks",
                          np.concatenate(const[-40:]) if const else None)
     recs.sort(key=lambda r: (r[0], r[1]))
@@ -1040,6 +1086,8 @@ def decode_segmented(path, secs=None, segment=SEGMENT_SECS, progress=None,
         return decode_capture(path, secs=secs, progress=progress, **kw)
 
     base_centre, rows = None, []
+    if progress:
+        progress(0.0, "picking carrier over the first 20 s")
     try:
         x0, sr0 = recv.load_wav_iq(path, secs=min(total, 20.0))
         x0 = x0 - x0.mean()

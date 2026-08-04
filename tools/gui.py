@@ -38,7 +38,7 @@ from scipy.signal import welch                                # noqa: E402
 from bgan import (spec, mod, recv, bulletin, pcapout, beams,   # noqa: E402
                   findings, sip, rtp, terminals, update)
 from tools.decode_wav import (decode_capture, decode_auto,       # noqa: E402
-                              survey, NoCarrier, segment_for,
+                              survey, NoCarrier, segment_for, wav_seconds,
                               estimate_ram, channelise, safe_stem, MOS)
 
 NL = chr(10)
@@ -71,6 +71,11 @@ LAB_W = 17          # label column width, characters
 # 101.7% and 120 s gave 100.0%. At ~49 MB/s of capture it peaks near 8.6 GB,
 # so it is a deliberate choice rather than the memory-driven default.
 SEG_BUTTON_SECS = 180.0
+
+# Chunk the spectrum read into this many seconds at a time. 30 s at 192 kHz is
+# ~46 MB per chunk and still 700 Welch averages, so the estimate is unchanged
+# while the peak is bounded and the bar can move during the read.
+PSD_CHUNK_SECS = 30.0
 
 
 class Fit(str):
@@ -140,20 +145,55 @@ class Worker(threading.Thread):
         except Exception:
             self.emit("error", text=traceback.format_exc())
 
+    def _spectrum(self):
+        """Welch PSD accumulated over the capture in chunks.
+
+        Loading the whole capture to average one periodogram kept 2.1 GB of a
+        25 min recording live across the entire decode -- most of what
+        segmenting saves, given the worker held it while decode_auto ran. The
+        mean of per-chunk periodograms is the same estimate at bounded cost,
+        it still covers the whole capture rather than a sample of it, and it
+        gives the bar something to move during a read that was silent.
+        """
+        total = self.secs or wav_seconds(self.path) or 0.0
+        fr = acc = None
+        weight = 0.0
+        t = 0.0
+        while t < total:
+            dur = min(PSD_CHUNK_SECS, total - t)
+            if dur < 0.5:
+                break
+            if self.stop.is_set():
+                raise KeyboardInterrupt
+            self.emit("progress", pct=6*t/total,
+                      text=f"reading capture for spectrum "
+                           f"({t:.0f}/{total:.0f} s)")
+            x, sr = recv.load_wav_iq(self.path, secs=dur, offset=t)
+            x = x - x.mean()
+            f, P = welch(x, sr, nperseg=8192, return_onesided=False,
+                         detrend=False)
+            del x
+            acc = P*dur if acc is None else acc + P*dur
+            fr, weight = f, weight + dur
+            t += dur
+        if acc is None:                     # capture shorter than half a chunk
+            x, sr = recv.load_wav_iq(self.path, secs=self.secs)
+            x = x - x.mean()
+            fr, acc = welch(x, sr, nperseg=8192, return_onesided=False,
+                            detrend=False)
+            del x
+            weight = 1.0
+        return fr, acc/weight, sr
+
     def _run(self):
         r = Result()
-        self.emit("status", text="loading capture...", pct=2)
-        x, sr = recv.load_wav_iq(self.path, secs=self.secs)
-        x = x - x.mean()
-
-        self.emit("status", text="computing spectrum...", pct=6)
-        fr, P = welch(x, sr, nperseg=8192, return_onesided=False,
-                      detrend=False)
+        self.emit("status", text="reading capture for spectrum...", pct=1)
+        fr, P, sr = self._spectrum()
         i = np.argsort(fr)
         self.emit("psd", f=fr[i], p=10*np.log10(P[i] + 1e-30), sr=sr)
 
         self.emit("status", text="channelising and recovering timing...",
-                  pct=10)
+                  pct=6)
 
         def prog(frac, text, const=None):
             if self.stop.is_set():
