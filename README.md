@@ -169,6 +169,7 @@ The estimate shown updates when you toggle level search.
 ```bash
 python tools/decode_wav.py capture.wav --survey     # fast scan, no decoding
 python tools/decode_wav.py capture.wav              # -> work/<capture>_payload.bin
+python tools/decode_wav.py capture.wav --pcap       # -> ..._ipv4.pcap as well
 python tools/decode_wav.py capture.wav --jobs 4     # cap the worker threads
 python tools/parse_bulletin.py work/payload.npz     # bearer control
 python tools/scan_bearers.py capture.wav            # what carriers are present
@@ -178,6 +179,11 @@ python tests/waterfall.py                           # codec vs Annex B2
 `--survey` prints the unique words seen, the framing runs with their offsets
 and timing phases, the UW-metric distribution and a yield forecast, in about a
 ninth of the time a full decode takes.
+
+`--pcap` carves IPv4 into a raw-IP pcap Wireshark opens directly;
+`--pcap-blocks` writes every decoded FEC block losslessly instead. Full
+reference, including segmenting long captures, input formats, exit codes and
+what the carve does *not* claim: [`docs/CLI.md`](docs/CLI.md).
 
 ### Capture settings
 
@@ -306,7 +312,7 @@ tools/
 tests/
   waterfall.py, constellation.py
 docs/
-  VALIDATION.md, SIGNAL_NOTES.md, OPEN_QUESTIONS.md, BEAMS.md
+  CLI.md, VALIDATION.md, SIGNAL_NOTES.md, OPEN_QUESTIONS.md, BEAMS.md
 beams.json                  shared spot-beam table
 beams.local.json.example    copy to beams.local.json for your own
 ```

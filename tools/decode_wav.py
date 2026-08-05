@@ -32,7 +32,7 @@ from collections import Counter
 from scipy.signal import resample_poly
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from bgan import spec, mod, recv, tx, bctrl, carrier
+from bgan import spec, mod, recv, tx, bctrl, carrier, pcapout
 from bgan import decoder as dec
 from bgan.pipeline import verify_block
 from bgan.turbo import map_to_symbols, turbo_encode
@@ -1235,6 +1235,19 @@ def main():
                          "but blocks 1-7 mostly will not decode)")
     ap.add_argument("--out", default=None,
                     help="payload path; defaults to work/<capture name>_payload.bin")
+    ap.add_argument("--pcap", nargs="?", const=True, default=None,
+                    metavar="PATH",
+                    help="carve IPv4 packets to a raw-IP pcap. Accepted only "
+                         "on a valid header checksum, so it is evidence "
+                         "rather than a faithful demux -- see "
+                         "bgan/pcapout.py. Defaults beside --out as "
+                         "*_ipv4.pcap.")
+    ap.add_argument("--pcap-blocks", nargs="?", const=True, default=None,
+                    metavar="PATH",
+                    help="write every decoded FEC block as a pcap record on a "
+                         "private link type. Lossless and uninterpreted, "
+                         "timestamped from the frame index. Defaults beside "
+                         "--out as *_blocks.pcap.")
     a = ap.parse_args()
 
     def prog(frac, text, const=None):
@@ -1339,6 +1352,27 @@ def main():
                             lens=np.array([len(o) for o in out]),
                             offs=offs, mets=mets, tau=tau_idx)
         print(f"  wrote {p} ({len(payload)} bytes) and {p.with_suffix('.npz')}")
+
+        # pcap, when asked. Both modes are opt-in because they make different
+        # claims: blocks is lossless, ipv4 is a checksum-gated carve.
+        def beside(arg, suffix):
+            return Path(arg) if arg is not True else \
+                p.with_name(p.stem.replace("_payload", "") + suffix)
+
+        if a.pcap:
+            q = beside(a.pcap, "_ipv4.pcap")
+            n = pcapout.write_ipv4(q, payload)
+            print(f"  wrote {q} ({n} carved IPv4 packet(s))")
+            if not n:
+                print("        no packet passed the header checksum - this "
+                      "bearer may carry no IP, or the decode was too lossy")
+        if a.pcap_blocks:
+            q = beside(a.pcap_blocks, "_blocks.pcap")
+            n = pcapout.write_blocks(
+                q, ((f, b, out[i]) for f, b, lv, ag, i in recs))
+            print(f"  wrote {q} ({n} FEC block record(s))")
+    elif a.pcap or a.pcap_blocks:
+        print("  nothing decoded, so no pcap written")
     return 0
 
 
