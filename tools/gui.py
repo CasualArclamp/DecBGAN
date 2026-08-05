@@ -16,7 +16,6 @@ import re
 import sys
 import textwrap
 import threading
-import wave
 import traceback
 from pathlib import Path
 
@@ -311,17 +310,18 @@ EST_NOSEARCH_RATIO = 0.69
 
 def probe_wav(path):
     """WAV header summary: duration, rate, channels, size. No samples read."""
+    # recv.wav_info, not the wave module: wave handles PCM only and raises
+    # "unknown format: 3" on the float captures most SDR software records, so
+    # a perfectly good file used to report as not a readable WAV.
     try:
         if not path or not os.path.isfile(path):
             return None
-        with wave.open(path) as w:
-            sr = w.getframerate()
-            n = w.getnframes()
-            if not sr or not n:
-                return None
-            return dict(sr=sr, ch=w.getnchannels(), width=w.getsampwidth(),
-                        frames=n, secs=n/sr,
-                        mb=os.path.getsize(path)/1e6)
+        i = recv.wav_info(path)
+        if not i.sr or not i.frames:
+            return None
+        return dict(sr=i.sr, ch=i.channels, width=i.bits//8,
+                    frames=i.frames, secs=i.secs, fmt=i.format_name,
+                    mb=os.path.getsize(path)/1e6)
     except Exception:
         return None
 
@@ -857,7 +857,8 @@ class App(tk.Tk):
                     f"~{estimate_ram(span)/2**30:.1f} GB peak")
         self.capvar.set(
             f"{p['secs']:.1f} s  |  {p['sr']/1e3:.0f} kHz  {p['ch']}ch "
-            f"{8*p['width']}-bit  |  {p['mb']:.0f} MB  |  "
+            f"{p.get('fmt', str(8*p['width']) + '-bit')}  |  "
+            f"{p['mb']:.0f} MB  |  "
             f"~{frames:.0f} frames, {frames*8:.0f} blocks  |  "
             f"full decode ~{_hms(est)}  |  {how}")
 

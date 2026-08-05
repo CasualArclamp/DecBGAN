@@ -18,34 +18,151 @@ from .tx import rrc
 
 # --- IQ loading --------------------------------------------------------------
 
-def load_wav_iq(path, secs=None, offset=0.0):
-    """Load interleaved int16 IQ from a WAV file. Returns (x, sample_rate)."""
-    f = open(path, "rb")
-    hdr = f.read(256)
-    if hdr[:4] != b"RIFF":
-        raise ValueError("not a RIFF file")
-    o, sr, data_off, bits = 12, None, None, None
-    while o < len(hdr)-8:
-        cid = hdr[o:o+4]
-        sz = struct.unpack("<I", hdr[o+4:o+8])[0]
-        if cid == b"fmt ":
-            _, ch, sr, _, _, bits = struct.unpack("<HHIIHH", hdr[o+8:o+24])
-            if ch != 2:
-                raise ValueError(f"expected 2 channels (I/Q), got {ch}")
-            if bits != 16:
-                raise ValueError(f"expected 16-bit, got {bits}")
-        if cid == b"data":
-            data_off = o+8
-            break
-        o += 8+sz+(sz & 1)
-    if data_off is None or sr is None:
+WAVE_PCM = 0x0001
+WAVE_FLOAT = 0x0003
+WAVE_EXTENSIBLE = 0xFFFE
+
+
+@dataclass
+class WavInfo:
+    """What the fmt/data chunks say, without reading any samples."""
+    sr: int
+    channels: int
+    bits: int
+    is_float: bool
+    data_off: int
+    data_len: int
+
+    @property
+    def frame_bytes(self):
+        return self.channels*self.bits//8
+
+    @property
+    def frames(self):
+        return self.data_len//self.frame_bytes if self.frame_bytes else 0
+
+    @property
+    def secs(self):
+        return self.frames/self.sr if self.sr else 0.0
+
+    @property
+    def format_name(self):
+        return f"{self.bits}-bit {'float' if self.is_float else 'int'}"
+
+
+def wav_info(path):
+    """Parse a WAV header. Returns WavInfo; raises ValueError if unusable.
+
+    Seeks chunk by chunk rather than parsing a fixed prefix of the file. SDR
+    recorders routinely put a large chunk before `data` -- SDR# and SDRuno
+    write an `auxi` chunk carrying centre frequency and a timestamp -- and a
+    prefix-based walk silently fails to find `data` past it.
+
+    WAVE_FORMAT_EXTENSIBLE (0xFFFE) is resolved through its SubFormat GUID,
+    whose first two octets carry the real format tag. Recorders emit it
+    routinely for anything that is not plain 16-bit stereo, so treating 0xFFFE
+    as unknown would reject most float captures.
+    """
+    with open(path, "rb") as f:
+        if f.read(4) != b"RIFF":
+            raise ValueError("not a RIFF file")
+        f.seek(4, 1)
+        if f.read(4) != b"WAVE":
+            raise ValueError("not a WAVE file")
+
+        sr = ch = bits = None
+        tag = None
+        data_off = data_len = None
+        while True:
+            head = f.read(8)
+            if len(head) < 8:
+                break
+            cid, sz = head[:4], struct.unpack("<I", head[4:8])[0]
+            if cid == b"fmt ":
+                b = f.read(sz)
+                if len(b) < 16:
+                    raise ValueError("truncated fmt chunk")
+                tag, ch, sr, _, _, bits = struct.unpack("<HHIIHH", b[:16])
+                if tag == WAVE_EXTENSIBLE:
+                    if len(b) < 26:
+                        raise ValueError("truncated WAVE_FORMAT_EXTENSIBLE")
+                    tag = struct.unpack("<H", b[24:26])[0]
+                if sz & 1:
+                    f.seek(1, 1)
+            elif cid == b"data":
+                data_off = f.tell()
+                # A recorder killed mid-capture leaves the size field at 0 or
+                # unwritten, so trust the file for the real extent.
+                end = Path(path).stat().st_size
+                data_len = min(sz, end - data_off) if sz else end - data_off
+                break
+            else:
+                f.seek(sz + (sz & 1), 1)
+
+    if sr is None or data_off is None:
         raise ValueError("no fmt/data chunk found")
-    f.seek(data_off + int(offset*sr)*4)
-    n = int(sr*secs)*4 if secs else -1
-    d = np.frombuffer(f.read(n), dtype="<i2").astype(np.float32)
+    if ch != 2:
+        raise ValueError(f"expected 2 channels (I/Q), got {ch}")
+    if tag not in (WAVE_PCM, WAVE_FLOAT):
+        raise ValueError(f"unsupported WAV format tag 0x{tag:04x} "
+                         "(want PCM or IEEE float)")
+    is_float = tag == WAVE_FLOAT
+    if is_float and bits not in (32, 64):
+        raise ValueError(f"float WAV must be 32 or 64-bit, got {bits}")
+    if not is_float and bits not in (8, 16, 24, 32):
+        raise ValueError(f"PCM WAV must be 8/16/24/32-bit, got {bits}")
+    return WavInfo(int(sr), int(ch), int(bits), is_float,
+                   int(data_off), int(data_len))
+
+
+def _decode_samples(buf, info):
+    """Raw interleaved bytes -> float32 samples scaled to +/-1.0.
+
+    Bit depth is a *format* conversion, not a resampling one: the sample
+    instants are unchanged, only how each sample is spelled. Float WAV is
+    already normalised to +/-1.0, so it is scaled by 1; integer PCM divides by
+    its full scale. 8-bit PCM is the odd one out in the WAV spec -- unsigned,
+    biased by 128 -- and reading it as signed puts a large DC step in the data.
+    """
+    if info.is_float:
+        d = np.frombuffer(buf, dtype="<f4" if info.bits == 32 else "<f8")
+        return d.astype(np.float32)
+    if info.bits == 8:
+        d = np.frombuffer(buf, dtype=np.uint8).astype(np.float32)
+        return (d - 128.0)/128.0
+    if info.bits == 16:
+        return np.frombuffer(buf, dtype="<i2").astype(np.float32)/32768.0
+    if info.bits == 24:
+        # No native 24-bit dtype: widen three little-endian octets each, then
+        # sign-extend by folding everything at or above 2^23 down a full turn.
+        b = np.frombuffer(buf, dtype=np.uint8)
+        b = b[:(len(b)//3)*3].reshape(-1, 3).astype(np.int32)
+        d = b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)
+        d = np.where(d >= 1 << 23, d - (1 << 24), d)
+        return d.astype(np.float32)/float(1 << 23)
+    return np.frombuffer(buf, dtype="<i4").astype(np.float32)/float(1 << 31)
+
+
+def load_wav_iq(path, secs=None, offset=0.0):
+    """Load interleaved IQ from a WAV file. Returns (x, sample_rate).
+
+    Accepts 8/16/24/32-bit PCM and 32/64-bit float, plain or
+    WAVE_FORMAT_EXTENSIBLE. Whatever comes in, complex64 scaled to +/-1.0
+    comes out, so nothing downstream sees the difference.
+    """
+    info = wav_info(path)
+    fb = info.frame_bytes
+    with open(path, "rb") as f:
+        start = int(offset*info.sr)*fb
+        f.seek(info.data_off + start)
+        want = int(info.sr*secs)*fb if secs else info.data_len - start
+        want = max(0, min(want, info.data_len - start))
+        # Never hand a partial frame to the decoders below.
+        buf = f.read(want - want % fb)
+    d = _decode_samples(buf, info)
     if len(d) % 2:
         d = d[:-1]
-    return (d[0::2] + 1j*d[1::2])/32768.0, sr
+    return (d[0::2] + 1j*d[1::2]).astype(np.complex64), info.sr
 
 
 # --- carrier location --------------------------------------------------------

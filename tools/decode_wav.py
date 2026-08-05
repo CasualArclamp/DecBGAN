@@ -1010,11 +1010,13 @@ def decode_auto(path, secs=None, progress=None, segment=None, **kw):
 
 
 def wav_seconds(path):
-    """Capture length in seconds from the header alone, or None."""
-    import wave
+    """Capture length in seconds from the header alone, or None.
+
+    recv.wav_info rather than the wave module, which is PCM-only and raises
+    on the float captures most SDR software records.
+    """
     try:
-        with wave.open(str(path)) as w:
-            return w.getnframes()/w.getframerate()
+        return recv.wav_info(str(path)).secs
     except Exception:
         return None
 
@@ -1074,13 +1076,7 @@ def decode_segmented(path, secs=None, segment=SEGMENT_SECS, progress=None,
     # candidate selection per segment was a net loss: pick_carrier's
     # thresholds need more than 10 s of data, three of seven segments came
     # back NoCarrier, and a capture that decoded 96.8% whole fell to 47.7%.
-    probe = None
-    try:
-        import wave
-        with wave.open(path) as w:
-            probe = w.getnframes()/w.getframerate()
-    except Exception:
-        pass
+    probe = wav_seconds(path)
     total = min(secs, probe) if (secs and probe) else (secs or probe)
     if not total:
         return decode_capture(path, secs=secs, progress=progress, **kw)
