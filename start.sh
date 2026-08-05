@@ -23,15 +23,18 @@ for c in python3 python py; do
     fi
 done
 
-# A venv built by install-bgan-decoder.sh wins over whatever is on PATH -- it
-# is where that installer put the dependencies, and on a PEP 668 system it is
-# the only place they could have gone. Scripts/ is checked as well as bin/ so
-# a venv made under Git Bash or MSYS is still found by this launcher.
-if [ -x ".venv/bin/python" ]; then
-    PY=".venv/bin/python"
-elif [ -x ".venv/Scripts/python.exe" ]; then
-    PY=".venv/Scripts/python.exe"
-fi
+# venv puts the interpreter in bin/ on Unix and Scripts/ on Windows.
+venv_python() {
+    if [ -x ".venv/bin/python" ]; then echo ".venv/bin/python"
+    elif [ -x ".venv/Scripts/python.exe" ]; then echo ".venv/Scripts/python.exe"
+    fi
+}
+
+# A .venv beside this script wins over whatever is on PATH. On a PEP 668
+# system that is the only place the dependencies could have been installed --
+# see below -- so preferring it is what makes a second launch work.
+VENVPY="$(venv_python)"
+[ -n "$VENVPY" ] && PY="$VENVPY"
 
 [ -n "$PY" ] || die "No working Python 3.9+ found on PATH (tried python3, python, py)."
 
@@ -46,7 +49,8 @@ if ! "$PY" -c 'import numpy, scipy, numba, matplotlib' >/dev/null 2>&1; then
         "$PY" -m venv .venv \
             || die "Could not create .venv. You may need your distribution's
   python3-venv package (Debian/Ubuntu: sudo apt install python3-venv)."
-        PY=".venv/bin/python"
+        PY="$(venv_python)"
+        [ -n "$PY" ] || die "Created .venv but found no interpreter inside it."
         "$PY" -m pip install --quiet --upgrade pip >/dev/null 2>&1
         "$PY" -m pip install --quiet -r requirements.txt \
             || die "Dependency install failed. Try: $PY -m pip install -r requirements.txt"
