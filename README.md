@@ -92,8 +92,15 @@ ts_1027440201_AnnexC2_v010101p0/
 
 `bgan/annex.py::annex_dir` also looks in `work/` and `annex/`.
 
-For the bearer-control layer you additionally want **TS 102 744-3-1** (the
-PDF), from the same place.
+**TS 102 744-3-1** is *not* needed. The bearer-control layer is implemented
+from it but does not read it: the field layouts and AVP rules are in the code.
+Without it you still get BulletinBoards, spot-beam id, RNC/BCt id, frame-no,
+the AVP list, per-block coding levels and SpotBeamMap decoding.
+
+The one thing it buys is cosmetic. Extract the PDF's text to `work/spec31.txt`
+and `tools/parse_bulletin.py --avps` prints AVP type *names*
+(`fwd-qos-control`) instead of numbers (`1`). 95 names, one CLI tool; the GUI
+never touches it.
 
 ---
 
