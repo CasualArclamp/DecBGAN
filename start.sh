@@ -22,12 +22,35 @@ for c in python3 python py; do
         break
     fi
 done
+
+# A venv built by install-bgan-decoder.sh wins over whatever is on PATH -- it
+# is where that installer put the dependencies, and on a PEP 668 system it is
+# the only place they could have gone. Scripts/ is checked as well as bin/ so
+# a venv made under Git Bash or MSYS is still found by this launcher.
+if [ -x ".venv/bin/python" ]; then
+    PY=".venv/bin/python"
+elif [ -x ".venv/Scripts/python.exe" ]; then
+    PY=".venv/Scripts/python.exe"
+fi
+
 [ -n "$PY" ] || die "No working Python 3.9+ found on PATH (tried python3, python, py)."
 
 if ! "$PY" -c 'import numpy, scipy, numba, matplotlib' >/dev/null 2>&1; then
     echo "  Installing dependencies (first run only)..."
-    "$PY" -m pip install --quiet -r requirements.txt \
-        || die "Dependency install failed. Try: $PY -m pip install -r requirements.txt"
+    if ! "$PY" -m pip install --quiet -r requirements.txt 2>/dev/null; then
+        # PEP 668: Debian 12+, Ubuntu 23.04+, Fedora 38+ and Homebrew Python
+        # refuse to install into the system interpreter at all. Build a venv
+        # rather than telling the user to override the refusal with
+        # --break-system-packages, which is exactly what it sounds like.
+        echo "  System Python will not accept packages; building a venv..."
+        "$PY" -m venv .venv \
+            || die "Could not create .venv. You may need your distribution's
+  python3-venv package (Debian/Ubuntu: sudo apt install python3-venv)."
+        PY=".venv/bin/python"
+        "$PY" -m pip install --quiet --upgrade pip >/dev/null 2>&1
+        "$PY" -m pip install --quiet -r requirements.txt \
+            || die "Dependency install failed. Try: $PY -m pip install -r requirements.txt"
+    fi
 fi
 
 # tkinter is not pip-installable; it comes from the system package.
