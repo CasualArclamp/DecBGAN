@@ -38,7 +38,14 @@ VENVPY="$(venv_python)"
 
 [ -n "$PY" ] || die "No working Python 3.9+ found on PATH (tried python3, python, py)."
 
-if ! "$PY" -c 'import numpy, scipy, numba, matplotlib' >/dev/null 2>&1; then
+# Check what gui.py actually imports, not a weaker proxy for it. `import
+# matplotlib` loads neither the Tk backend nor PIL, so it passed on a Fedora 44
+# box whose matplotlib then died on `from PIL import ImageTk` -- issue #25. The
+# check has to fail where the GUI would fail.
+DEPS='import numpy, scipy, numba
+import matplotlib.backends.backend_tkagg'
+
+if ! "$PY" -c "$DEPS" >/dev/null 2>&1; then
     echo "  Installing dependencies (first run only)..."
     if ! "$PY" -m pip install --quiet -r requirements.txt 2>/dev/null; then
         # PEP 668: Debian 12+, Ubuntu 23.04+, Fedora 38+ and Homebrew Python
@@ -72,6 +79,31 @@ if ! "$PY" -c 'import tkinter' >/dev/null 2>&1; then
   The command-line tools work without it:
 
       python3 tools/decode_wav.py capture.wav --survey
+
+MSG
+    exit 1
+fi
+
+# matplotlib's Tk backend does `from PIL import Image, ImageTk`, and several
+# distributions ship ImageTk in a separate package from the rest of Pillow.
+# Reported on Fedora 44 (issue #25): a pip matplotlib in /usr/local paired with
+# a dnf Pillow in /usr/lib64 that had no ImageTk, so the GUI died on import
+# after every earlier check had passed. Inside a venv pip supplies its own
+# Pillow and this cannot arise, so reaching here means a system interpreter.
+if ! "$PY" -c 'from PIL import ImageTk' >/dev/null 2>&1; then
+    cat >&2 <<'MSG'
+
+  Pillow is installed but PIL.ImageTk is missing, which matplotlib's Tk
+  backend needs. Several distributions package it separately:
+
+      Fedora          sudo dnf install python3-pillow-tk
+      Debian/Ubuntu   sudo apt install python3-pil.imagetk
+      Arch            included in python-pillow
+
+  Or sidestep the mixed system/pip install altogether by letting this script
+  build a virtual environment, where pip supplies its own Pillow:
+
+      rm -rf .venv && python3 -m venv .venv && ./start.sh
 
 MSG
     exit 1
