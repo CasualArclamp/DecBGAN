@@ -43,7 +43,10 @@ exit /b 1
 exit /b %errorlevel%
 
 :checkdeps
-%PY% -c "import numpy, scipy, numba, matplotlib" >nul 2>&1
+rem Check what gui.py actually imports. `import matplotlib` loads neither the
+rem Tk backend nor PIL, so it can pass on an install the GUI then dies on --
+rem see issue #25, where that gap hid a missing PIL.ImageTk until launch.
+%PY% -c "import numpy, scipy, numba, matplotlib.backends.backend_tkagg" >nul 2>&1
 if %errorlevel%==0 goto :checktk
 echo   Installing dependencies (first run only)...
 %PY% -m pip install --quiet -r requirements.txt
