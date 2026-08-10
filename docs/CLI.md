@@ -177,6 +177,50 @@ Header only, no decode:
 python -c "import sys;sys.path.insert(0,'.');from bgan import recv;i=recv.wav_info('capture.wav');print(i.sr,'Hz',i.format_name,f'{i.secs:.1f} s')"
 ```
 
+## Live ZMQ input
+
+`tools/decode_zmq.py` subscribes to a live IQ stream and decodes it in
+overlapping windows:
+
+```bash
+python tools/decode_zmq.py tcp://127.0.0.1:5555 --sample-rate 768000
+```
+
+This is a rolling offline decode, not a stateful sample-by-sample receiver.
+The tool buffers `--chunk-secs` of IQ, decodes that window through the same
+path as `decode_wav.py`, keeps `--overlap-secs` for boundary safety, and
+deduplicates decoded frame/block records by their approximate stream time.
+
+Supported payload formats:
+
+| format | payload |
+|---|---|
+| `cf32` | little-endian complex64, one complex sample per item |
+| `f32iq` | little-endian float32 I/Q pairs |
+| `cs16` | little-endian signed int16 I/Q pairs, scaled by 32768 |
+| `cu8` | unsigned 8-bit I/Q pairs, centered at 127.5 |
+
+Multipart messages are accepted; by default the final part contains IQ bytes.
+Use `--topic` to subscribe to a prefix and `--part N` if the IQ payload lives
+in a different multipart field.
+
+Useful options:
+
+```bash
+python tools/decode_zmq.py tcp://127.0.0.1:5555 \
+  --sample-rate 768000 \
+  --format cs16 \
+  --chunk-secs 30 \
+  --overlap-secs 3 \
+  --max-buffer-secs 120 \
+  --jobs 8
+```
+
+If decoding takes longer than samples arrive, the bounded buffer drops the
+oldest IQ and prints a warning. Increase `--chunk-secs`, reduce decode cost
+with `--no-search-levels`, add workers with `--jobs`, or raise
+`--max-buffer-secs` if delayed rather than near-live decoding is acceptable.
+
 ---
 
 ## Bearer control from a decode

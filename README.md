@@ -171,6 +171,7 @@ python tools/decode_wav.py capture.wav --survey     # fast scan, no decoding
 python tools/decode_wav.py capture.wav              # -> work/<capture>_payload.bin
 python tools/decode_wav.py capture.wav --pcap       # -> ..._ipv4.pcap as well
 python tools/decode_wav.py capture.wav --jobs 4     # cap the worker threads
+python tools/decode_zmq.py tcp://127.0.0.1:5555 --sample-rate 768000
 python tools/parse_bulletin.py work/payload.npz     # bearer control
 python tools/scan_bearers.py capture.wav            # what carriers are present
 python tests/waterfall.py                           # codec vs Annex B2
@@ -307,7 +308,7 @@ bgan/
   pcapout.py    pcap writers, IPv4 carving
   tx.py         reference transmitter (for validation)
 tools/
-  gui.py, decode_wav.py, parse_bulletin.py, scan_bearers.py,
+  gui.py, decode_wav.py, decode_zmq.py, parse_bulletin.py, scan_bearers.py,
   find_framenum.py, find_counter.py, make_test_iq.py
 tests/
   waterfall.py, constellation.py
