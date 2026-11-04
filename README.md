@@ -1,5 +1,7 @@
 # BGAN forward-link decoder
 
+If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
+
 A receiver for the Inmarsat BGAN forward bearer **F80T4.5X-8B** (151.2 kBd
 16-QAM, 189 kHz, 80 ms frames), written against ETSI TS 102 744. It takes an
 IQ recording and produces decoded payload bytes, parsed bearer-control
