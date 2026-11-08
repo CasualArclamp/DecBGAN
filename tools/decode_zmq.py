@@ -28,6 +28,7 @@ except ImportError as exc:  # pragma: no cover - exercised by users
     ) from exc
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bgan import pcapout  # noqa: E402
 from tools.decode_wav import (  # noqa: E402
     ACCEPT_AGREEMENT,
     NoCarrier,
@@ -251,6 +252,18 @@ def main() -> int:
     ap.add_argument("--no-cfo", dest="cfo", action="store_false")
     ap.add_argument("--no-search-levels", dest="search_levels",
                     action="store_false")
+    ap.add_argument("--pcap", nargs="?", const=True, default=None,
+                    metavar="PATH",
+                    help="live raw-IP pcap of checksum-valid IPv4 packets "
+                         "carved from the payload, appended and flushed "
+                         "after every window so Wireshark can follow it. "
+                         "Same caveats as decode_wav.py --pcap. Defaults "
+                         "beside --out as *_ipv4.pcap.")
+    ap.add_argument("--pcap-blocks", nargs="?", const=True, default=None,
+                    metavar="PATH",
+                    help="live lossless pcap: every decoded FEC block as a "
+                         "DLT_USER0 record. Defaults beside --out as "
+                         "*_blocks.pcap.")
     ap.add_argument("--out", default=None,
                     help="payload path; default work/zmq_<endpoint>_payload.bin")
     a = ap.parse_args()
@@ -268,6 +281,20 @@ def main() -> int:
     out = Path(a.out) if a.out else Path("work") / f"zmq_{stem}_payload.bin"
     if out.exists():
         out.unlink()
+
+    def beside(arg, suffix):
+        return Path(arg) if arg is not True else             out.with_name(out.stem.replace("_payload", "") + suffix)
+
+    live_ip = live_blk = None
+    if a.pcap:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        live_ip = pcapout.LivePcap(beside(a.pcap, "_ipv4.pcap"), "ipv4")
+        print(f"live IPv4 pcap -> {live_ip._f.name}")
+    if a.pcap_blocks:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        live_blk = pcapout.LivePcap(beside(a.pcap_blocks, "_blocks.pcap"),
+                                    "blocks")
+        print(f"live block pcap -> {live_blk._f.name}")
 
     buf = SampleBuffer(max_samples)
     rx = ZmqIqReceiver(a.endpoint, topic, a.part, a.format, buf, a.recv_hwm)
@@ -319,6 +346,11 @@ def main() -> int:
                 seen.add(key)
                 fresh.append((key[0], b, lv, ag, bits))
             blocks, nbytes = append_payload(out, fresh)
+            if live_blk and fresh:
+                live_blk.add_blocks((f, b, bits) for f, b, _, _, bits in fresh)
+            if live_ip and fresh:
+                live_ip.add_payload(np.packbits(
+                    np.concatenate([r[4] for r in fresh])).tobytes())
             total_blocks += blocks
             total_bytes += nbytes
             chunks += 1
@@ -338,6 +370,10 @@ def main() -> int:
         rx.stop()
         buf.close()
         rx.join(timeout=2.0)
+        for lp in (live_ip, live_blk):
+            if lp:
+                print(f"pcap {Path(lp._f.name).name}: {lp.records} record(s)")
+                lp.close()
         print(f"received {rx.messages} message(s), {rx.bytes} byte(s); "
               f"{rx.errors} malformed message(s)")
     return 0

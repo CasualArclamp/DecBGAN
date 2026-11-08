@@ -221,6 +221,30 @@ oldest IQ and prints a warning. Increase `--chunk-secs`, reduce decode cost
 with `--no-search-levels`, add workers with `--jobs`, or raise
 `--max-buffer-secs` if delayed rather than near-live decoding is acceptable.
 
+
+### Live pcap
+
+```bash
+python tools/decode_zmq.py tcp://127.0.0.1:5555 --sample-rate 768000 --pcap
+python tools/decode_zmq.py tcp://127.0.0.1:5555 --sample-rate 768000 --pcap-blocks
+```
+
+Both take an optional path and can be combined. The file is appended and
+flushed after every window, so a crash or Ctrl-C leaves a valid pcap. Follow
+it in Wireshark as it grows:
+
+```bash
+tail -c +1 -f work/zmq_*_ipv4.pcap | wireshark -k -i -
+```
+
+`--pcap` is the same checksum-gated IPv4 carve as the offline tool, run
+incrementally: the last 1500 bytes are kept between windows so a packet that
+straddles a window boundary is still found, and none is written twice. Its
+timestamps are the wall-clock time the packet was carved, not when it crossed
+the air. `--pcap-blocks` is lossless, stamped from the frame index like the
+offline version. The same caveat applies: no RLC/MAC reassembly, so packets
+split across FEC blocks or lost to undecoded blocks do not appear.
+
 ---
 
 ## Bearer control from a decode

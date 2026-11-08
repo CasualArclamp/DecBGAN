@@ -119,3 +119,77 @@ def write_ipv4(path, payload, t0=0.0, dt=0.001):
         for k, (_, pkt) in enumerate(out):
             f.write(_rec(t0 + k*dt, pkt))
     return len(out)
+
+
+class LivePcap:
+    """Append-only pcap for a live decode, flushed after every batch.
+
+    Follow it live with `tail -c +1 -f file.pcap | wireshark -k -i -`, or open
+    it and use File > Reload. The global header is written once, every `add_*` call flushes, so a crash
+    or Ctrl-C leaves a valid file.
+
+    `mode="blocks"`: one DLT_USER0 record per decoded FEC block, stamped
+    `t0 + frame*80 ms` exactly as `write_blocks`.
+
+    `mode="ipv4"`: a checksum-gated carve as in `carve_ipv4`, run incrementally.
+    The last `max_len` bytes of payload are kept between batches so a packet
+    that straddles a batch boundary is still found; offsets already emitted
+    are never emitted twice. Timestamps are the wall-clock time the packet was
+    carved, which is when we *knew* about it -- not when it crossed the air.
+    Same caveat as the offline carve: no RLC/MAC reassembly, so packets split
+    across FEC blocks or lost to undecoded blocks simply do not appear.
+    """
+
+    def __init__(self, path, mode="ipv4", t0=None, max_len=1500):
+        import time
+        if mode not in ("ipv4", "blocks"):
+            raise ValueError(mode)
+        self.mode = mode
+        self.max_len = max_len
+        self.t0 = time.time() if t0 is None else t0
+        self.records = 0
+        self._tail = b""        # trailing payload bytes kept for straddlers
+        self._emitted_to = 0    # bytes of `_tail` already fully carved past
+        self._f = open(path, "wb")
+        self._f.write(_hdr(DLT_RAW if mode == "ipv4" else DLT_USER0))
+        self._f.flush()
+
+    def add_blocks(self, records):
+        """records: iterable of (frame_index, block_index, payload_bits)."""
+        n = 0
+        for frame, block, bits in records:
+            data = np.packbits(np.asarray(bits, dtype=np.uint8)).tobytes()
+            self._f.write(_rec(self.t0 + frame*FRAME_SECS
+                               + block*FRAME_SECS/8, data))
+            n += 1
+        self._f.flush()
+        self.records += n
+        return n
+
+    def add_payload(self, payload, now=None):
+        """Feed newly decoded payload bytes; returns packets written."""
+        import time
+        now = time.time() if now is None else now
+        buf = self._tail + bytes(payload)
+        skip = self._emitted_to          # packets ending before this are old
+        n = 0
+        last_end = skip
+        for off, pkt in carve_ipv4(buf, max_len=self.max_len):
+            end = off + len(pkt)
+            if end <= skip:
+                continue
+            self._f.write(_rec(now + n*1e-6, pkt))
+            n += 1
+            last_end = end
+        self._f.flush()
+        self.records += n
+        # keep only what a straddling packet could still need
+        keep = min(len(buf), self.max_len)
+        cut = len(buf) - keep
+        self._tail = buf[cut:]
+        self._emitted_to = max(0, max(last_end, skip) - cut)
+        return n
+
+    def close(self):
+        if not self._f.closed:
+            self._f.close()
